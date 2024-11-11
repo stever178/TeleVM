@@ -31,6 +31,8 @@ const MAX_SOCKET_MSG_LENGTH: usize = 8192;
 pub const MACHINE_TYPE_ARG: &str = "-machine q35";
 #[cfg(target_arch = "aarch64")]
 pub const MACHINE_TYPE_ARG: &str = "-machine virt";
+#[cfg(target_arch = "riscv64")]
+pub const MACHINE_TYPE_ARG: &str = "-machine microvm";
 
 pub struct StreamHandler {
     stream: UnixStream,

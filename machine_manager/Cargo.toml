@@ -2,7 +2,7 @@
 name = "machine_manager"
 version = "2.2.0"
 authors = ["Huawei StratoVirt Team", "China Telecom"]
-edition = "2023"
+edition = "2021"
 license = "Mulan PSL v2"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

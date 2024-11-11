@@ -20,12 +20,16 @@ use crate::utils::{read_le_u16, read_le_u32, read_le_u64};
 use machine::aarch64::standard::{LayoutEntryType, MEM_LAYOUT};
 #[cfg(target_arch = "x86_64")]
 use machine::x86_64::standard::{LayoutEntryType, MEM_LAYOUT};
+#[cfg(target_arch = "riscv64")]
+use machine::micro_vm::mem_layout::{LayoutEntryType, MEM_LAYOUT};
 
 const PCIE_MMIO_BASE: u64 = MEM_LAYOUT[LayoutEntryType::PcieMmio as usize].0;
 const PCIE_MMIO_SIZE: u64 = MEM_LAYOUT[LayoutEntryType::PcieMmio as usize].1;
 #[cfg(target_arch = "aarch64")]
 const PCIE_ECAM_BASE: u64 = MEM_LAYOUT[LayoutEntryType::HighPcieEcam as usize].0;
 #[cfg(target_arch = "x86_64")]
+const PCIE_ECAM_BASE: u64 = MEM_LAYOUT[LayoutEntryType::PcieEcam as usize].0;
+#[cfg(target_arch = "riscv64")]
 const PCIE_ECAM_BASE: u64 = MEM_LAYOUT[LayoutEntryType::PcieEcam as usize].0;
 
 pub trait PciBusOps {

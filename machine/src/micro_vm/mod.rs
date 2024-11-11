@@ -20,7 +20,7 @@ pub mod error;
 pub use error::MicroVmError;
 use util::aio::AioEngine;
 
-mod mem_layout;
+pub mod mem_layout;
 
 use super::Result as MachineResult;
 use log::error;

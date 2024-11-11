@@ -41,7 +41,8 @@ use util::aio::{aio_probe, AioEngine};
 use util::byte_code::ByteCode;
 use util::num_ops::round_up;
 use util::offset_of;
-use virtio::device::block::VirtioBlkConfig;
+// use virtio::device::block::VirtioBlkConfig;
+use virtio::block::VirtioBlkConfig;
 
 const TEST_IMAGE_SIZE_1M: u64 = 1024 * 1024;
 const DEFAULT_SECTOR_SIZE: u64 = 512;

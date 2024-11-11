@@ -27,7 +27,7 @@
 //! - `riscv64`
 
 
-mod block;
+pub mod block;
 mod console;
 pub mod error;
 mod net;

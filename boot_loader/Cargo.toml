@@ -2,7 +2,7 @@
 name = "boot_loader"
 version = "2.2.0"
 authors = ["Huawei StratoVirt Team", "China Telecom"]
-edition = "2023"
+edition = "2021"
 license = "Mulan PSL v2"
 
 [dependencies]

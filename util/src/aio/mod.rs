@@ -42,6 +42,8 @@ const AIO_OFF: &str = "off";
 const AIO_NATIVE: &str = "native";
 /// Io-uring aio type.
 const AIO_IOURING: &str = "io_uring";
+/// Aio implemented by thread pool.
+const AIO_THREADS: &str = "threads";
 /// Max bytes of bounce buffer for misaligned IO.
 const MAX_LEN_BOUNCE_BUFF: u64 = 1 << 20;
 
@@ -50,6 +52,7 @@ pub enum AioEngine {
     Off = 0,
     Native = 1,
     IoUring = 2,
+    Threads = 3,
 }
 
 impl FromStr for AioEngine {
@@ -60,7 +63,19 @@ impl FromStr for AioEngine {
             AIO_OFF => Ok(AioEngine::Off),
             AIO_NATIVE => Ok(AioEngine::Native),
             AIO_IOURING => Ok(AioEngine::IoUring),
+            AIO_THREADS => Ok(AioEngine::Threads),
             _ => Err(()),
+        }
+    }
+}
+
+impl ToString for AioEngine {
+    fn to_string(&self) -> String {
+        match *self {
+            AioEngine::Off => "off".to_string(),
+            AioEngine::Native => "native".to_string(),
+            AioEngine::IoUring => "io_uring".to_string(),
+            AioEngine::Threads => "threads".to_string(),
         }
     }
 }
@@ -69,6 +84,19 @@ impl FromStr for AioEngine {
 pub struct Iovec {
     pub iov_base: u64,
     pub iov_len: u64,
+}
+
+impl Iovec {
+    pub fn new(base: u64, len: u64) -> Self {
+        Iovec {
+            iov_base: base,
+            iov_len: len,
+        }
+    }
+
+    pub fn is_none(&self) -> bool {
+        self.iov_base == 0 && self.iov_len == 0
+    }
 }
 
 /// The trait for Asynchronous IO operation.
@@ -129,6 +157,7 @@ pub fn aio_probe(engine: AioEngine) -> Result<()> {
         AioEngine::IoUring => {
             IoUringContext::probe(1)?;
         }
+        _ => {}
     }
     Ok(())
 }
@@ -141,6 +170,8 @@ impl<T: Clone + 'static> Aio<T> {
             AioEngine::Off => None,
             AioEngine::Native => Some(Box::new(LibaioContext::new(max_events as u32, &fd)?)),
             AioEngine::IoUring => Some(Box::new(IoUringContext::new(max_events as u32, &fd)?)),
+            // AioEngine::Threads => Some(Box::new(threads_aio_ctx)),
+            _ => bail!("Aio type {:?} does not support thread pools", engine),
         };
 
         Ok(Aio {

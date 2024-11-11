@@ -17,7 +17,7 @@
 // See the Mulan PSL v2 for more details.
 
 pub mod error;
-mod micro_vm;
+pub mod micro_vm;
 
 pub use crate::error::MachineError;
 use std::collections::{BTreeMap, HashMap};

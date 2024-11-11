@@ -23,6 +23,8 @@ use machine::aarch64::standard::{LayoutEntryType, MEM_LAYOUT};
 pub const FW_CFG_BASE: u64 = MEM_LAYOUT[LayoutEntryType::FwCfg as usize].0;
 #[cfg(target_arch = "x86_64")]
 pub const FW_CFG_BASE: u64 = 0x510;
+#[cfg(target_arch = "riscv64")]
+pub const FW_CFG_BASE: u64 = 0x510;
 
 const FW_CFG_FNAME_SIZE: usize = 56;
 
