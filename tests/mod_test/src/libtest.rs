@@ -350,22 +350,32 @@ fn socket_accept_wait(listener: UnixListener, timeout: Duration) -> Option<UnixS
 }
 
 pub fn test_init(extra_arg: Vec<&str>) -> TestState {
-    let binary_path = env::var("STRATOVIRT_BINARY").unwrap();
+    let binary_path = env::var("TELEVM_BINARY").unwrap();
     let tmp_dir = get_tmp_dir();
+    println!("-- tmp_dir is {}", tmp_dir);
     let test_socket = format!("{}/test.socket", tmp_dir);
     let qmp_socket = format!("{}/qmp.socket", tmp_dir);
 
     let listener = init_socket(&test_socket);
 
     let child = Command::new(binary_path)
+        //.args(["", &format!("")])
+        //.args(["-smp", &format!("cpus=1,maxcpus=2,sockets=2")])
+        //.args(["-m", &format!("1024")])
+        .args(["-kernel", &format!("/home/lsj/shared/Image-6.9")])
+        .args(["-append", &format!("root=/dev/vda rw console=ttyS0")])
+        .args(["-drive", &format!("id=rootfs,file=/home/lsj/rootfs/rootfs_guest.ext4")])
+        .args(["-device", &format!("virtio-blk-device,drive=rootfs,id=blk1")])
+        .args(["-device", &format!("vhost-vsock-device,id=vsock1,guest-cid=2")])
+        .args(["-serial", &format!("stdio")])
+        .args(["-netdev", &format!("tap,id=net0,ifname=tap0")])
         .args(["-qmp", &format!("unix:{},server,nowait", qmp_socket)])
-        .args(["-mod-test", &test_socket])
+        //.args(["-mod-test", &test_socket])
         .args(extra_arg)
         .spawn()
         .unwrap();
-
-    let test_sock =
-        StreamHandler::new(socket_accept_wait(listener, Duration::from_secs(10)).unwrap());
+    
+    let test_sock = StreamHandler::new(socket_accept_wait(listener, Duration::from_secs(10)).unwrap());
     let qmp_sock = StreamHandler::new(connect_socket(&qmp_socket));
 
     TestState::new(child, test_sock, qmp_sock, tmp_dir)
