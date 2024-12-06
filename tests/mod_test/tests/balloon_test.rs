@@ -442,7 +442,8 @@ fn balloon_feature_001() {
     let pci_fn: u8 = 0x0;
     let mut extra_args: Vec<&str> = Vec::new();
 
-    let mut args: Vec<&str> = "-machine virt".split(' ').collect();
+    // let mut args: Vec<&str> = "-machine virt".split(' ').collect();
+    let mut args: Vec<&str> = "-machine microvm".split(' ').collect();
     extra_args.append(&mut args);
 
     let mem_args = format!("-m {}", 128);
@@ -489,7 +490,8 @@ fn balloon_feature_002() {
     let pci_fn: u8 = 0x0;
     let mut extra_args: Vec<&str> = Vec::new();
 
-    let mut args: Vec<&str> = "-machine virt".split(' ').collect();
+    // let mut args: Vec<&str> = "-machine virt".split(' ').collect();
+    let mut args: Vec<&str> = "-machine microvm".split(' ').collect();
     extra_args.append(&mut args);
 
     let mem_args = format!("-m {}", 128);

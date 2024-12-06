@@ -68,7 +68,8 @@ fn fmt_demo_deves(cfg: DemoDev, num: u8) -> String {
 fn init_demo_dev(cfg: DemoDev, dev_num: u8) -> (Rc<RefCell<TestPciDev>>, Rc<RefCell<TestState>>) {
     let mut demo_dev_args: Vec<&str> = Vec::new();
 
-    let mut args: Vec<&str> = "-machine virt -D /tmp/oscar.log".split(' ').collect();
+    // let mut args: Vec<&str> = "-machine virt -D /tmp/oscar.log".split(' ').collect();
+    let mut args: Vec<&str> = "-machine microvm -D /tmp/oscar.log".split(' ').collect();
     demo_dev_args.append(&mut args);
 
     let demo_str = fmt_demo_deves(cfg.clone(), dev_num);
@@ -334,7 +335,8 @@ fn create_machine(
 ) {
     let mut extra_args: Vec<&str> = Vec::new();
 
-    let mut args: Vec<&str> = "-machine virt".split(' ').collect();
+    // let mut args: Vec<&str> = "-machine virt".split(' ').collect();
+    let mut args: Vec<&str> = "-machine microvm".split(' ').collect();
     extra_args.append(&mut args);
 
     for device_arg in device_args.iter() {

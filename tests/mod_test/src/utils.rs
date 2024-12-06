@@ -90,6 +90,12 @@ pub fn create_img(size: u64, flag: u8) -> String {
         .arg("count=1")
         .output()
         .expect("failed to create image");
+
+    println!("output is {:?}", output);
+    if !output.status.success() {
+        eprintln!("Error: {:?}", String::from_utf8_lossy(&output.stderr));
+    }
+
     assert!(output.status.success());
     image_path
 }

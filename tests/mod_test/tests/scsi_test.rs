@@ -576,7 +576,8 @@ fn scsi_test_init(
     Rc<RefCell<TestState>>,
     Rc<RefCell<GuestAllocator>>,
 ) {
-    let mut args: Vec<&str> = "-machine virt".split(' ').collect();
+    // let mut args: Vec<&str> = "-machine virt".split(' ').collect();
+    let mut args: Vec<&str> = "-machine microvm".split(' ').collect();
 
     let pci_fn = 0;
     let pci_slot = 0x4;

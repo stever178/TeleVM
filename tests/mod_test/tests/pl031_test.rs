@@ -42,7 +42,8 @@ fn pl031_write_reg(ts: &TestState, reg: u64, val: u32) {
 }
 
 fn set_up() -> TestState {
-    let extra_args: Vec<&str> = "-machine virt".split(' ').collect();
+    // let extra_args: Vec<&str> = "-machine virt".split(' ').collect();
+    let extra_args: Vec<&str> = "-machine microvm".split(' ').collect();
     test_init(extra_args)
 }
 

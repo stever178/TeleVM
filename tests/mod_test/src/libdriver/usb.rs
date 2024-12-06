@@ -1855,7 +1855,8 @@ pub struct TestUsbBuilder {
 impl TestUsbBuilder {
     pub fn new() -> Self {
         let mut args = Vec::new();
-        let machine: Vec<&str> = "-machine virt".split(' ').collect();
+        // let machine: Vec<&str> = "-machine virt".split(' ').collect();
+        let mut args: Vec<&str> = "-machine microvm".split(' ').collect();
         let mut arg = machine.into_iter().map(|s| s.to_string()).collect();
         args.append(&mut arg);
         Self {

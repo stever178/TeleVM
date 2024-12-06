@@ -37,7 +37,8 @@ pub struct FwCfgDmaAccess {
 }
 
 pub fn bios_args(base_args: &mut Vec<&str>) {
-    let mut args: Vec<&str> = "-machine virt".split(' ').collect();
+    // let mut args: Vec<&str> = "-machine virt".split(' ').collect();
+    let mut args: Vec<&str> = "-machine microvm".split(' ').collect();
     base_args.append(&mut args);
     args = "-drive file=/usr/share/edk2/aarch64/QEMU_EFI-pflash.raw,if=pflash,unit=0,readonly=true"
         .split(' ')

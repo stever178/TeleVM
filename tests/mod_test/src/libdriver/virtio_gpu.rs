@@ -603,7 +603,8 @@ pub fn set_up(
 
     let mut args: Vec<String> = Vec::new();
     // vm args
-    let vm_args = String::from("-machine virt");
+    // let vm_args = String::from("-machine virt");
+    let vm_args = String::from("-machine microvm");
     let vm_args: Vec<&str> = vm_args[..].split(' ').collect();
     let mut vm_args = vm_args.into_iter().map(|s| s.to_string()).collect();
     args.append(&mut vm_args);

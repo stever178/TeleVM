@@ -41,7 +41,8 @@ pub fn create_console(
 ) {
     let mut extra_args: Vec<&str> = Vec::new();
 
-    let mut args: Vec<&str> = "-machine virt".split(' ').collect();
+    // let mut args: Vec<&str> = "-machine virt".split(' ').collect();
+    let mut args: Vec<&str> = "-machine microvm".split(' ').collect();
     extra_args.append(&mut args);
 
     let serial_pci_args = format!(

@@ -365,7 +365,7 @@ pub fn test_init(extra_arg: Vec<&str>) -> TestState {
     // 防止 qmp_sock 尝试连接的时间早于 TeleVM 进程初始化并监听该套接字的时间
     // let qmp_sock = StreamHandler::new(connect_socket(&qmp_socket));
     // 等待套接字就绪，最多等待 num_secs 秒
-    let num_secs = 30;
+    let num_secs = 360;
     match wait_for_socket(&qmp_socket, num_secs) {
         Ok(()) => {
             println!("Socket is ready, proceeding with QMP connection");

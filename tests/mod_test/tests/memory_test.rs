@@ -604,7 +604,8 @@ fn ram_readwrite_exception() {
 #[test]
 fn ram_readwrite_numa() {
     let mut args: Vec<&str> = Vec::new();
-    let mut extra_args: Vec<&str> = "-machine virt".split(' ').collect();
+    // let mut extra_args: Vec<&str> = "-machine virt".split(' ').collect();
+    let mut extra_args: Vec<&str> = "-machine microvm".split(' ').collect();
     args.append(&mut extra_args);
 
     let cpu = 8;

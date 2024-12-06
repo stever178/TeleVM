@@ -408,7 +408,8 @@ pub fn create_net(
     let pci_fn: u8 = 0x0;
     let mut extra_args: Vec<&str> = Vec::new();
 
-    let mut args: Vec<&str> = "-machine virt".split(' ').collect();
+    // let mut args: Vec<&str> = "-machine virt".split(' ').collect();
+    let mut args: Vec<&str> = "-machine microvm".split(' ').collect();
     extra_args.append(&mut args);
 
     let mut iothread_arg = "";
