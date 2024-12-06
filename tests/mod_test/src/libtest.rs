@@ -10,7 +10,8 @@
 // NON-INFRINGEMENT, MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 // See the Mulan PSL v2 for more details.
 
-use std::cell::RefCell;
+use serde_json::Value;
+use std::io;
 use std::io::Read;
 use std::io::Write;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -22,33 +23,19 @@ use std::time::Instant;
 use std::{env, fs};
 
 use hex;
-use serde_json::Value;
 
 use crate::utils::get_tmp_dir;
 
-const MAX_SOCKET_MSG_LENGTH: usize = 8192;
-#[cfg(target_arch = "x86_64")]
-pub const MACHINE_TYPE_ARG: &str = "-machine q35";
-#[cfg(target_arch = "aarch64")]
-pub const MACHINE_TYPE_ARG: &str = "-machine virt";
-#[cfg(target_arch = "riscv64")]
-pub const MACHINE_TYPE_ARG: &str = "-machine microvm";
-
 pub struct StreamHandler {
     stream: UnixStream,
-    read_buffer: RefCell<String>,
 }
 
 impl StreamHandler {
     fn new(stream: UnixStream) -> Self {
-        StreamHandler {
-            stream,
-            read_buffer: RefCell::new(String::new()),
-        }
+        StreamHandler { stream }
     }
 
     fn write_line(&self, cmd: &str) {
-        assert!(cmd.len() <= MAX_SOCKET_MSG_LENGTH);
         self.stream
             .try_clone()
             .unwrap()
@@ -58,7 +45,7 @@ impl StreamHandler {
 
     fn read_line(&self, timeout: Duration) -> String {
         let start = Instant::now();
-        let mut resp = self.read_buffer.borrow_mut();
+        let mut resp = String::new();
         let mut stream = self.stream.try_clone().unwrap();
         stream.set_nonblocking(true).unwrap();
 
@@ -73,11 +60,8 @@ impl StreamHandler {
             }
         };
 
-        let (line, left) = resp.split_at(pos.unwrap());
-        let line = line.trim().to_string();
-        // Save the remaining strings to the buffer, except the prefix '\n'.
-        *resp = left[1..].to_string();
-        line
+        let (line, _) = resp.split_at(pos.unwrap());
+        line.trim().to_string()
     }
 }
 
@@ -284,48 +268,14 @@ impl TestState {
         let buf = self.send_test_cmd(&cmd);
         let resp: Vec<&str> = buf.split(' ').collect();
         assert_eq!(resp.len(), 2);
-        // match resp[0] {
-        //     "OK" => match resp[1] {
-        //         "TRUE" => true,
-        //         "FALSE" => false,
-        //         _ => panic!("Failed to execute {}.", cmd),
-        //     },
-        //     _ => panic!("Failed to execute {}.", cmd),
-        // }
-        true
-    }
-
-    pub fn query_intx(&self, irq: u32) -> bool {
-        let cmd = format!("query_intx {}", irq);
-        let buf = self.send_test_cmd(&cmd);
-        let resp: Vec<&str> = buf.split(' ').collect();
-        assert_eq!(resp.len(), 2);
-
-        // match resp[0] {
-        //     "OK" => match resp[1] {
-        //         "TRUE" => true,
-        //         "FALSE" => false,
-        //         _ => panic!("Failed to execute {}.", cmd),
-        //     },
-        //     _ => panic!("Failed to execute {}.", cmd),
-        // }
-        true
-    }
-
-    pub fn eoi_intx(&self, irq: u32) -> bool {
-        let cmd = format!("eoi_intx {}", irq);
-        let buf = self.send_test_cmd(&cmd);
-        let resp: Vec<&str> = buf.split(' ').collect();
-        assert_eq!(resp.len(), 2);
-        // match resp[0] {
-        //     "OK" => match resp[1] {
-        //         "TRUE" => true,
-        //         "FALSE" => false,
-        //         _ => panic!("Failed to execute {}.", cmd),
-        //     },
-        //     _ => panic!("Failed to execute {}.", cmd),
-        // }
-        true
+        match resp[0] {
+            "OK" => match resp[1] {
+                "TRUE" => true,
+                "FALSE" => false,
+                _ => panic!("Failed to execute {}.", cmd),
+            },
+            _ => panic!("Failed to execute {}.", cmd),
+        }
     }
 }
 
@@ -337,8 +287,8 @@ fn init_socket(path: &str) -> UnixListener {
     UnixListener::bind(socket).unwrap()
 }
 
-fn connect_socket(path: &str) -> UnixStream {
-    UnixStream::connect(path).unwrap()
+fn connect_socket(path: &str) -> io::Result<UnixStream> {
+    UnixStream::connect(path) //.unwrap()
 }
 
 fn socket_accept_wait(listener: UnixListener, timeout: Duration) -> Option<UnixStream> {
@@ -354,19 +304,52 @@ fn socket_accept_wait(listener: UnixListener, timeout: Duration) -> Option<UnixS
     None
 }
 
+fn wait_for_socket(socket_path: &str, timeout_secs: u64) -> io::Result<()> {
+    // let start_time = std::time::SystemTime::now();
+    let mut attempt = 0;
+
+    while attempt < timeout_secs {
+        // 检查套接字文件是否存在
+        if Path::new(socket_path).exists() {
+            match connect_socket(socket_path) {
+                Ok(_stream) => {
+                    // 连接成功，关闭流并返回
+                    // stream.close()?;
+                    println!("Connection attempt {} seconds", attempt);
+                    return Ok(());
+                },
+                Err(e) => {
+                    // 连接失败，可能是 QEMU 还没有准备好
+                    println!("Connection attempt {} failed: {}", attempt, e);
+                },
+            }
+        }
+
+        // 等待一段时间后再次尝试
+        std::thread::sleep(Duration::from_secs(1));
+        attempt += 1;
+    }
+
+    // 超过最大重试次数后返回错误
+    Err(io::Error::new(io::ErrorKind::Other, "Timeout waiting for socket"))
+}
+
 pub fn test_init(extra_arg: Vec<&str>) -> TestState {
     let binary_path = env::var("TELEVM_BINARY").unwrap();
     let tmp_dir = get_tmp_dir();
     // let test_socket = format!("{}/test.socket", tmp_dir);
     let qmp_socket = format!("{}/qmp.socket", tmp_dir);
-
+    
+    // let listener = init_socket(&test_socket);
+    
+    let shared_path = env::var("SHARED_PATH").unwrap();
     let child = Command::new(binary_path)
         //.args(["", &format!("")])
-        //.args(["-smp", &format!("cpus=1,maxcpus=2,sockets=2")])
-        //.args(["-m", &format!("1024")])
-        .args(["-kernel", &format!("/home/lsj/shared/Image-6.9")])
+        // .args(["-smp", &format!("cpus=1,maxcpus=2,sockets=2")])
+        // .args(["-m", &format!("1G")])
+        .args(["-kernel", &format!("{}/Image-6.9", shared_path)])
         .args(["-append", &format!("root=/dev/vda rw console=ttyS0")])
-        .args(["-drive", &format!("id=rootfs,file=/home/lsj/rootfs/rootfs_guest.ext4")])
+        .args(["-drive", &format!("id=rootfs,file={}/rootfs_guest.ext4", shared_path)])
         .args(["-device", &format!("virtio-blk-device,drive=rootfs,id=blk1")])
         .args(["-device", &format!("vhost-vsock-device,id=vsock1,guest-cid=2")])
         .args(["-serial", &format!("stdio")])
@@ -376,11 +359,33 @@ pub fn test_init(extra_arg: Vec<&str>) -> TestState {
         .args(extra_arg)
         .spawn()
         .unwrap();
-    
-    // let listener = init_socket(&test_socket);
+
     // let test_sock = StreamHandler::new(socket_accept_wait(listener, Duration::from_secs(10)).unwrap());
-    let qmp_sock = StreamHandler::new(connect_socket(&qmp_socket));
     
-    // TestState::new(child, test_sock, qmp_sock, tmp_dir)
-    TestState::new(child, qmp_sock, tmp_dir)
+    // 防止 qmp_sock 尝试连接的时间早于 TeleVM 进程初始化并监听该套接字的时间
+    // let qmp_sock = StreamHandler::new(connect_socket(&qmp_socket));
+    // 等待套接字就绪，最多等待 num_secs 秒
+    let num_secs = 30;
+    match wait_for_socket(&qmp_socket, num_secs) {
+        Ok(()) => {
+            println!("Socket is ready, proceeding with QMP connection");
+            // 继续进行 QMP 连接
+            let qmp_sock = StreamHandler::new(connect_socket(&qmp_socket).unwrap());
+
+            // let cmd = "123123";
+            // qmp_sock.write_line(cmd);
+            // let res = qmp_sock.read_line(Duration::from_secs(num_secs));
+            // println!("cmd is {}, res is {}\n", cmd, res);
+            // assert!(cmd == res);
+
+            TestState::new(child, qmp_sock, tmp_dir)
+        },
+        Err(e) => {
+            eprintln!("Failed to connect to QMP socket: {}", e);
+            // 处理错误，可能是退出程序或尝试其他恢复策略
+            let qmp_sock = StreamHandler::new(connect_socket(&qmp_socket).unwrap());
+            // TestState::new(child, test_sock, qmp_sock, tmp_dir)
+            TestState::new(child, qmp_sock, tmp_dir)
+        },
+    }
 }

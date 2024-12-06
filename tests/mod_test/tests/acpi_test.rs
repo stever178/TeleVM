@@ -10,55 +10,18 @@
 // NON-INFRINGEMENT, MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 // See the Mulan PSL v2 for more details.
 
-use std::{cell::RefCell, mem, rc::Rc};
-
-use byteorder::{ByteOrder, LittleEndian};
-
 use acpi::{
     AcpiGicCpu, AcpiGicDistributor, AcpiGicRedistributor, AcpiRsdp, AcpiSratGiccAffinity,
-    AcpiSratMemoryAffinity, AcpiTableHeader, CacheHierarchyNode, ProcessorHierarchyNode,
+    AcpiSratMemoryAffinity, AcpiTableHeader, ProcessorHierarchyNode,
 };
-use machine::aarch64::standard::{LayoutEntryType, MEM_LAYOUT};
-use mod_test::libdriver::fwcfg::bios_args;
+use byteorder::{ByteOrder, LittleEndian};
+use machine::standard_vm::aarch64::{LayoutEntryType, MEM_LAYOUT};
 use mod_test::libdriver::machine::TestStdMachine;
 use mod_test::libdriver::malloc::GuestAllocator;
+use std::{cell::RefCell, mem, rc::Rc};
+
+use mod_test::libdriver::fwcfg::bios_args;
 use mod_test::libtest::{test_init, TestState};
-
-// Now facs table data length is 64.
-const FACS_TABLE_DATA_LENGTH: u32 = 64;
-// Now dsdt table data length is 3488.
-const DSDT_TABLE_DATA_LENGTH: u32 = 3488;
-// Now fadt table data length is 276.
-const FADT_TABLE_DATA_LENGTH: u32 = 276;
-// Now madt table data length is 744.
-const MADT_TABLE_DATA_LENGTH: u32 = 744;
-// Now gtdt table data length is 96.
-const GTDT_TABLE_DATA_LENGTH: u32 = 96;
-// Now dbg2 table data length is 87.
-const DBG2_TABLE_DATA_LENGTH: u32 = 87;
-// Now iort table data length is 128.
-const IORT_TABLE_DATA_LENGTH: u32 = 128;
-// Now spcr table data length is 80.
-const SPCR_TABLE_DATA_LENGTH: u32 = 80;
-// Now mcfg table data length is 60.
-const MCFG_TABLE_DATA_LENGTH: u32 = 60;
-// Now acpi tables data length is 6133(cpu number is 8).
-const ACPI_TABLES_DATA_LENGTH_8: usize = 6139;
-// Now acpi tables data length is 40574(cpu number is 200).
-const ACPI_TABLES_DATA_LENGTH_200: usize = 40580;
-
-enum TABLE {
-    Fadt,
-    Madt,
-    Gtdt,
-    Dbg2,
-    Iort,
-    Spcr,
-    Mcfg,
-    Srat,
-    Slit,
-    Pptt,
-}
 
 fn test_rsdp(test_state: &TestState, alloc: &mut GuestAllocator) -> u64 {
     let file_name = "etc/acpi/rsdp";
@@ -75,7 +38,7 @@ fn test_rsdp(test_state: &TestState, alloc: &mut GuestAllocator) -> u64 {
     assert_eq!(file_size, mem::size_of::<AcpiRsdp>() as u32);
     // Check RSDP signature: "RSD PTR".
     assert_eq!(String::from_utf8_lossy(&read_data[..8]), "RSD PTR ");
-    // Check RSDP revision: 2.
+    // Check RSDP revison: 2.
     assert_eq!(read_data[15], 2);
 
     // Check 32-bit address of RSDT table: 0
@@ -91,37 +54,21 @@ fn test_rsdp(test_state: &TestState, alloc: &mut GuestAllocator) -> u64 {
 
 fn check_dsdt(data: &[u8]) {
     assert_eq!(String::from_utf8_lossy(&data[..4]), "DSDT");
-    assert_eq!(LittleEndian::read_u32(&data[4..]), DSDT_TABLE_DATA_LENGTH); // Check length
+    assert_eq!(LittleEndian::read_u32(&data[4..]), 736); // Check length
 }
 
-fn check_facs(data: &[u8]) {
-    assert_eq!(String::from_utf8_lossy(&data[..4]), "FACS");
-    assert_eq!(LittleEndian::read_u32(&data[4..]), FACS_TABLE_DATA_LENGTH); // Check length
-}
-
-fn check_fadt(data: &[u8]) -> (u32, u64) {
+fn check_fadt(data: &[u8]) {
     assert_eq!(String::from_utf8_lossy(&data[..4]), "FACP");
-    assert_eq!(LittleEndian::read_u32(&data[4..]), FADT_TABLE_DATA_LENGTH); // Check length
+    assert_eq!(LittleEndian::read_u32(&data[4..]), 276); // Check length
 
-    // Enable HW_REDUCED_ACPI and LOW_POWER_S0_IDLE_CAPABLE bit
-    assert_eq!(LittleEndian::read_i32(&data[112..]), 0x30_0500);
+    assert_eq!(LittleEndian::read_i32(&data[112..]), 0x10_0500); // Enable HW_REDUCED_ACPI bit
     assert_eq!(LittleEndian::read_u16(&data[129..]), 0x3); // ARM Boot Architecture Flags
     assert_eq!(LittleEndian::read_i32(&data[131..]), 3); // FADT minor revision
-
-    // Check 32-bit address of FACS table.
-    let facs_addr = LittleEndian::read_u32(&data[36..]);
-    assert_eq!(facs_addr, 0);
-
-    // Check 64-bit address of DSDT table.
-    let dsdt_addr = LittleEndian::read_u64(&data[140..]);
-    assert_ne!(dsdt_addr, 0);
-
-    (facs_addr, dsdt_addr)
 }
 
 fn check_madt(data: &[u8], cpu: u8) {
     assert_eq!(String::from_utf8_lossy(&data[..4]), "APIC");
-    assert_eq!(LittleEndian::read_u32(&data[4..]), MADT_TABLE_DATA_LENGTH); // Check length
+    assert_eq!(LittleEndian::read_u32(&data[4..]), 744); // Check length
 
     let mut offset = 44;
 
@@ -133,11 +80,11 @@ fn check_madt(data: &[u8], cpu: u8) {
     let gicd_addr = LittleEndian::read_u64(&data[(offset + 8)..]);
     assert_eq!(gicd_addr, MEM_LAYOUT[LayoutEntryType::GicDist as usize].0);
 
-    // Check GIC version
+    // Check GIC verison
     assert_eq!(data[offset + 20], 3);
 
     // Check GIC CPU
-    offset += mem::size_of::<AcpiGicDistributor>();
+    offset = offset + mem::size_of::<AcpiGicDistributor>();
     for i in 0..cpu {
         assert_eq!(data[offset + 1], 80); // The length of this structure
         assert_eq!(LittleEndian::read_u32(&data[(offset + 4)..]), i as u32); // CPU interface number
@@ -146,7 +93,7 @@ fn check_madt(data: &[u8], cpu: u8) {
         assert_eq!(LittleEndian::read_u32(&data[(offset + 20)..]), 23); // Performance monitoring interrupts
         assert_eq!(LittleEndian::read_u64(&data[(offset + 56)..]), 25); // Virtual GIC maintenance interrupt
         assert_eq!(LittleEndian::read_u64(&data[(offset + 68)..]), i as u64); // MPIDR
-        offset += mem::size_of::<AcpiGicCpu>();
+        offset = offset + mem::size_of::<AcpiGicCpu>();
     }
 
     // Check GIC Redistributor
@@ -154,16 +101,15 @@ fn check_madt(data: &[u8], cpu: u8) {
     assert_eq!(MEM_LAYOUT[LayoutEntryType::GicRedist as usize].0, addr);
 
     // Check GIC Its
-    offset += mem::size_of::<AcpiGicRedistributor>();
+    offset = offset + mem::size_of::<AcpiGicRedistributor>();
     addr = LittleEndian::read_u64(&data[(offset + 8)..]);
     assert_eq!(MEM_LAYOUT[LayoutEntryType::GicIts as usize].0, addr);
 }
 
 fn check_gtdt(data: &[u8]) {
     assert_eq!(String::from_utf8_lossy(&data[..4]), "GTDT");
-    assert_eq!(LittleEndian::read_u32(&data[4..]), GTDT_TABLE_DATA_LENGTH); // Check length
+    assert_eq!(LittleEndian::read_u32(&data[4..]), 96); // Check length
 
-    assert_eq!(LittleEndian::read_u64(&data[36..]), 0xFFFF_FFFF_FFFF_FFFF); // Counter control block physical address
     assert_eq!(LittleEndian::read_u32(&data[48..]), 29); // Secure EL1 interrupt
     assert_eq!(LittleEndian::read_u32(&data[52..]), 0); // Secure EL1 flags
     assert_eq!(LittleEndian::read_u32(&data[56..]), 30); // Non secure EL1 interrupt
@@ -172,43 +118,31 @@ fn check_gtdt(data: &[u8]) {
     assert_eq!(LittleEndian::read_u32(&data[68..]), 0); // Virtual timer flags
     assert_eq!(LittleEndian::read_u32(&data[72..]), 26); // Non secure EL2 interrupt
     assert_eq!(LittleEndian::read_u32(&data[76..]), 0); // Non secure EL2 flags
-    assert_eq!(LittleEndian::read_u64(&data[80..]), 0xFFFF_FFFF_FFFF_FFFF); // Counter base block physical address
-}
-
-fn check_dbg2(data: &[u8]) {
-    assert_eq!(String::from_utf8_lossy(&data[..4]), "DBG2");
-    assert_eq!(LittleEndian::read_u32(&data[4..]), DBG2_TABLE_DATA_LENGTH); // Check length
 }
 
 fn check_iort(data: &[u8]) {
     assert_eq!(String::from_utf8_lossy(&data[..4]), "IORT");
-    assert_eq!(LittleEndian::read_u32(&data[4..]), IORT_TABLE_DATA_LENGTH); // Check length
+    assert_eq!(LittleEndian::read_u32(&data[4..]), 128); // Check length
 
     // Check IORT nodes is 2: ITS group node and Root Complex Node.
     assert_eq!(LittleEndian::read_u32(&data[36..]), 2);
     assert_eq!(LittleEndian::read_u32(&data[40..]), 48); // Node offset
     assert_eq!(data[48], 0); // ITS group node
     assert_eq!(LittleEndian::read_u16(&data[49..]), 24); // ITS node length
-    assert_eq!(data[51], 1); // ITS node revision
     assert_eq!(LittleEndian::read_u32(&data[64..]), 1); // ITS count
     assert_eq!(data[72], 2); // Root Complex Node
     assert_eq!(LittleEndian::read_u16(&data[73..]), 56); // Length of Root Complex Node
-    assert_eq!(data[75], 3); // Revision of Root Complex Node
-    assert_eq!(LittleEndian::read_u32(&data[76..]), 1); // Identifier of Root Complex Node
     assert_eq!(LittleEndian::read_u32(&data[80..]), 1); // Mapping counts of Root Complex Node
     assert_eq!(LittleEndian::read_u32(&data[84..]), 36); // Mapping offset of Root Complex Node
     assert_eq!(LittleEndian::read_u32(&data[88..]), 1); // Cache of coherent device
     assert_eq!(data[95], 3); // Memory flags of coherent device
-    assert_eq!(data[104], 0x40); // Memory address size limit
     assert_eq!(LittleEndian::read_u32(&data[112..]), 0xffff); // Identity RID mapping
-
-    // Without SMMU, id mapping is the first node in ITS group node
-    assert_eq!(LittleEndian::read_u32(&data[120..]), 48);
+    assert_eq!(LittleEndian::read_u32(&data[120..]), 48); // Without SMMU, id mapping is the first node in ITS group node
 }
 
 fn check_spcr(data: &[u8]) {
     assert_eq!(String::from_utf8_lossy(&data[..4]), "SPCR");
-    assert_eq!(LittleEndian::read_u32(&data[4..]), SPCR_TABLE_DATA_LENGTH); // Check length
+    assert_eq!(LittleEndian::read_u32(&data[4..]), 80); // Check length
 
     assert_eq!(data[36], 3); // Interface type: ARM PL011 UART
     assert_eq!(data[41], 8); // Bit width of AcpiGenericAddress
@@ -218,20 +152,17 @@ fn check_spcr(data: &[u8]) {
         MEM_LAYOUT[LayoutEntryType::Uart as usize].0
     );
     assert_eq!(data[52], 1_u8 << 3); // Interrupt Type: Arm GIC interrupu
-    assert_eq!(LittleEndian::read_u32(&data[54..]), 39); // Irq number used by the UART
+    assert_eq!(LittleEndian::read_u32(&data[54..]), 65); // Irq number used by the UART
     assert_eq!(data[58], 3); // Set baud rate: 3 = 9600
     assert_eq!(data[60], 1); // Stop bit
     assert_eq!(data[61], 2); // Hardware flow control
-
-    // PCI Device ID: it is not a PCI device
-    assert_eq!(LittleEndian::read_u16(&data[64..]), 0xffff);
-    // PCI Vendor ID: it is not a PCI device
-    assert_eq!(LittleEndian::read_u16(&data[66..]), 0xffff);
+    assert_eq!(LittleEndian::read_u16(&data[64..]), 0xffff); // PCI Device ID: it is not a PCI device
+    assert_eq!(LittleEndian::read_u16(&data[66..]), 0xffff); // PCI Vendor ID: it is not a PCI device
 }
 
 fn check_mcfg(data: &[u8]) {
     assert_eq!(String::from_utf8_lossy(&data[..4]), "MCFG");
-    assert_eq!(LittleEndian::read_u32(&data[4..]), MCFG_TABLE_DATA_LENGTH); // Check length
+    assert_eq!(LittleEndian::read_u32(&data[4..]), 60); // Check length
 
     assert_eq!(
         LittleEndian::read_u64(&data[44..]),
@@ -255,17 +186,17 @@ fn check_srat(data: &[u8]) {
     // -numa node,nodeid=1,cpus=4-7,memdev=mem1
     for i in 0..2 {
         for j in 0..4 {
-            let proximity_domain = LittleEndian::read_u32(&data[(offset + 2)..]);
-            assert_eq!(proximity_domain, i);
+            let proximity_domian = LittleEndian::read_u32(&data[(offset + 2)..]);
+            assert_eq!(proximity_domian, i);
             let process_uid = LittleEndian::read_u32(&data[(offset + 6)..]);
             assert_eq!(process_uid, (i * 4) + j);
-            offset += mem::size_of::<AcpiSratGiccAffinity>();
+            offset = offset + mem::size_of::<AcpiSratGiccAffinity>();
         }
         assert_eq!(LittleEndian::read_u64(&data[(offset + 8)..]), base_addr);
         let size = LittleEndian::read_u64(&data[(offset + 16)..]);
         assert_eq!(size, 0x8000_0000);
         base_addr = base_addr + size;
-        offset += mem::size_of::<AcpiSratMemoryAffinity>();
+        offset = offset + mem::size_of::<AcpiSratMemoryAffinity>();
     }
 }
 
@@ -283,7 +214,7 @@ fn check_slit(data: &[u8]) {
             } else {
                 assert_eq!(data[offset], 30);
             }
-            offset += 1;
+            offset = offset + 1;
         }
     }
 }
@@ -294,52 +225,23 @@ fn check_pptt(data: &[u8]) {
     // offset = AcpiTable.len = 36
     let mut offset = 36;
     // sockets = 1, clusters = 1, cores = 4, threads = 2
-    // Check L3 cache type, next_level and attributes.
-    assert_eq!(data[offset], 1);
-    assert_eq!(LittleEndian::read_u32(&data[(offset + 8)..]), 0);
-    assert_eq!(data[offset + 21], 10);
-
     // Check sockets flags and processor_id.
-    offset += mem::size_of::<CacheHierarchyNode>();
     assert_eq!(LittleEndian::read_u32(&data[(offset + 4)..]), 1);
     assert_eq!(LittleEndian::read_u32(&data[(offset + 12)..]), 0);
 
     // Check clusters flags and processor_id.
-    // Sockets have an L3 cache, so it's offset to add 4.
-    offset += mem::size_of::<ProcessorHierarchyNode>() + 4;
+    offset = offset + mem::size_of::<ProcessorHierarchyNode>();
     assert_eq!(LittleEndian::read_u32(&data[(offset + 4)..]), 0);
     assert_eq!(LittleEndian::read_u32(&data[(offset + 12)..]), 0);
 
+    // Check cores flags and processor_id.
     for i in 0..4 {
-        // Check L2 cache type, next_level and attributes.
-        offset += mem::size_of::<ProcessorHierarchyNode>();
-        assert_eq!(data[offset], 1);
-        assert_eq!(LittleEndian::read_u32(&data[(offset + 8)..]), 0);
-        assert_eq!(data[offset + 21], 10);
-
-        // Check L1D cache type, next_level and attributes.
-        let next_level = offset as u32;
-        offset += mem::size_of::<CacheHierarchyNode>();
-        assert_eq!(data[offset], 1);
-        assert_eq!(LittleEndian::read_u32(&data[(offset + 8)..]), next_level);
-        assert_eq!(data[offset + 21], 2);
-
-        // Check L1I cache type, next_level and attributes.
-        offset += mem::size_of::<CacheHierarchyNode>();
-        assert_eq!(data[offset], 1);
-        assert_eq!(LittleEndian::read_u32(&data[(offset + 8)..]), next_level);
-        assert_eq!(data[offset + 21], 4);
-
-        // Check cores flags and processor_id.
-        offset += mem::size_of::<CacheHierarchyNode>();
+        offset = offset + mem::size_of::<ProcessorHierarchyNode>();
         assert_eq!(LittleEndian::read_u32(&data[(offset + 4)..]), 0);
         assert_eq!(LittleEndian::read_u32(&data[(offset + 12)..]), i);
-
-        // Cores have L2, L1D, L1I cache, so it'3 offset to add 3 * 4;
-        offset += 3 * 4;
         for j in 0..2 {
             // Check threads flags and processor_id.
-            offset += mem::size_of::<ProcessorHierarchyNode>();
+            offset = offset + mem::size_of::<ProcessorHierarchyNode>();
             assert_eq!(LittleEndian::read_u32(&data[(offset + 4)..]), 0xE);
             assert_eq!(LittleEndian::read_u32(&data[(offset + 12)..]), i * 2 + j);
         }
@@ -348,16 +250,12 @@ fn check_pptt(data: &[u8]) {
 
 fn test_tables(test_state: &TestState, alloc: &mut GuestAllocator, xsdt_addr: usize, cpu: u8) {
     let file_name = "etc/acpi/tables";
-    let mut read_data: Vec<u8> = Vec::with_capacity(ACPI_TABLES_DATA_LENGTH_8);
+    // Now acpi tables data length is 2864.
+    let mut read_data: Vec<u8> = Vec::with_capacity(2864);
 
     // Select FileDir entry and read it.
-    let file_size = test_state.fw_cfg_read_file(
-        alloc,
-        file_name,
-        &mut read_data,
-        ACPI_TABLES_DATA_LENGTH_8 as u32,
-    );
-    assert_eq!(file_size, ACPI_TABLES_DATA_LENGTH_8 as u32);
+    let file_size = test_state.fw_cfg_read_file(alloc, file_name, &mut read_data, 2864);
+    assert_eq!(file_size, 2864);
 
     // Check XSDT
     assert_eq!(
@@ -366,62 +264,56 @@ fn test_tables(test_state: &TestState, alloc: &mut GuestAllocator, xsdt_addr: us
     );
 
     // XSDT entry: An array of 64-bit physical addresses that point to other DESCRIPTION_HEADERs.
-    // DESCRIPTION_HEADERs: FADT, MADT, GTDT, IORT, SPCR, MCFG, SRAT, SLIT, PPTT
-    let entry_addr = xsdt_addr + mem::size_of::<AcpiTableHeader>();
+    // DESCRIPTION_HEADERs: DSDT, FADT, MADT, GTDT, IORT, SPCR, MCFG, SRAT, SLIT, PPTT
+    let entry_addr = xsdt_addr + mem::size_of::<AcpiTableHeader>() - 8;
 
-    // Check FADT
-    let mut offset = entry_addr + TABLE::Fadt as usize * 8;
-    let fadt_addr = LittleEndian::read_u64(&read_data[offset..]);
-    let (facs_addr, dsdt_addr) = check_fadt(&read_data[(fadt_addr as usize)..]);
-
-    // Check FACS (FACS table is pointed to by the FADT table)
-    check_facs(&read_data[(facs_addr as usize)..]);
-
-    // Check DSDT (DSDT table is pointed to by the FADT table)
+    // Check DSDT
+    let mut offset = entry_addr;
+    let dsdt_addr = LittleEndian::read_u64(&read_data[offset..]);
     check_dsdt(&read_data[(dsdt_addr as usize)..]);
 
+    // Check FADT
+    offset = entry_addr + 1 * 8;
+    let fadt_addr = LittleEndian::read_u64(&read_data[offset..]);
+    check_fadt(&read_data[(fadt_addr as usize)..]);
+
     // Check MADT
-    offset = entry_addr + TABLE::Madt as usize * 8;
+    offset = entry_addr + 2 * 8;
     let madt_addr = LittleEndian::read_u64(&read_data[offset..]);
     check_madt(&read_data[(madt_addr as usize)..], cpu);
 
     // Check GTDT
-    offset = entry_addr + TABLE::Gtdt as usize * 8;
+    offset = entry_addr + 3 * 8;
     let gtdt_addr = LittleEndian::read_u64(&read_data[offset..]);
     check_gtdt(&read_data[(gtdt_addr as usize)..]);
 
-    // Check DBG2
-    offset = entry_addr + TABLE::Dbg2 as usize * 8;
-    let gtdt_addr = LittleEndian::read_u64(&read_data[offset..]);
-    check_dbg2(&read_data[(gtdt_addr as usize)..]);
-
     // Check IORT
-    offset = entry_addr + TABLE::Iort as usize * 8;
+    offset = entry_addr + 4 * 8;
     let iort_addr = LittleEndian::read_u64(&read_data[offset..]);
     check_iort(&read_data[(iort_addr as usize)..]);
 
     // Check SPCR
-    offset = entry_addr + TABLE::Spcr as usize * 8;
+    offset = entry_addr + 5 * 8;
     let spcr_addr = LittleEndian::read_u64(&read_data[offset..]);
     check_spcr(&read_data[(spcr_addr as usize)..]);
 
     // Check MCFG
-    offset = entry_addr + TABLE::Mcfg as usize * 8;
+    offset = entry_addr + 6 * 8;
     let mcfg_addr = LittleEndian::read_u64(&read_data[offset..]);
     check_mcfg(&read_data[(mcfg_addr as usize)..]);
 
     // Check SRAT
-    offset = entry_addr + TABLE::Srat as usize * 8;
+    offset = entry_addr + 7 * 8;
     let srat_addr = LittleEndian::read_u64(&read_data[offset..]);
     check_srat(&read_data[(srat_addr as usize)..]);
 
     // Check SLIT
-    offset = entry_addr + TABLE::Slit as usize * 8;
+    offset = entry_addr + 8 * 8;
     let slit_addr = LittleEndian::read_u64(&read_data[offset..]);
     check_slit(&read_data[(slit_addr as usize)..]);
 
     // Check PPTT
-    offset = entry_addr + TABLE::Pptt as usize * 8;
+    offset = entry_addr + 9 * 8;
     let pptt_addr = LittleEndian::read_u64(&read_data[offset..]);
     check_pptt(&read_data[(pptt_addr as usize)..]);
 }
@@ -433,22 +325,18 @@ fn check_madt_of_two_gicr(
     cpus: usize,
 ) {
     let file_name = "etc/acpi/tables";
-    let mut read_data: Vec<u8> = Vec::with_capacity(ACPI_TABLES_DATA_LENGTH_200);
+    // Now acpi tables data length is 29212.
+    let mut read_data: Vec<u8> = Vec::with_capacity(29212);
 
     // Select FileDir entry and read it.
-    test_state.fw_cfg_read_file(
-        alloc,
-        file_name,
-        &mut read_data,
-        ACPI_TABLES_DATA_LENGTH_200 as u32,
-    );
+    test_state.fw_cfg_read_file(alloc, file_name, &mut read_data, 29212);
 
     // XSDT entry: An array of 64-bit physical addresses that point to other DESCRIPTION_HEADERs.
-    // DESCRIPTION_HEADERs: FADT, MADT, GTDT, IORT, SPCR, MCFG, SRAT, SLIT, PPTT
-    let entry_addr = xsdt_addr + mem::size_of::<AcpiTableHeader>();
+    // DESCRIPTION_HEADERs: DSDT, FADT, MADT, GTDT, IORT, SPCR, MCFG, SRAT, SLIT, PPTT
+    let entry_addr = xsdt_addr + mem::size_of::<AcpiTableHeader>() - 8;
 
     // MADT offset base on XSDT
-    let mut offset = entry_addr + TABLE::Madt as usize * 8;
+    let mut offset = entry_addr + 2 * 8;
     let madt_addr = LittleEndian::read_u64(&read_data[offset..]) as usize;
 
     // Check second GIC Redistributor
@@ -466,6 +354,7 @@ fn check_madt_of_two_gicr(
     );
 }
 
+#[cfg(target_arch = "aarch64")]
 #[test]
 fn test_acpi_virt() {
     let mut args = Vec::new();
@@ -516,6 +405,7 @@ fn test_acpi_virt() {
     test_state.borrow_mut().stop();
 }
 
+#[cfg(target_arch = "aarch64")]
 #[test]
 fn test_acpi_two_gicr() {
     let mut args = Vec::new();

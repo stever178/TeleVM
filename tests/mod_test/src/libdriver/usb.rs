@@ -19,7 +19,6 @@ use std::{
 };
 
 use byteorder::{ByteOrder, LittleEndian};
-use serde_json::Value;
 
 use super::{
     machine::TestStdMachine,
@@ -28,27 +27,26 @@ use super::{
     pci_bus::TestPciBus,
 };
 use crate::libdriver::pci::{PciMsixOps, PCI_DEVICE_ID};
-use crate::libtest::{test_init, TestState, MACHINE_TYPE_ARG};
-use devices::usb::{
+use crate::libtest::{test_init, TestState};
+use usb::{
     config::*,
     hid::{
         HID_GET_IDLE, HID_GET_PROTOCOL, HID_GET_REPORT, HID_SET_IDLE, HID_SET_PROTOCOL,
         HID_SET_REPORT,
     },
+    usb::UsbDeviceRequest,
     xhci::{
         xhci_controller::{
             DwordOrder, XhciEpCtx, XhciInputCtrlCtx, XhciSlotCtx, EP_RUNNING, SLOT_DEFAULT,
         },
         xhci_regs::{
             XHCI_INTR_REG_ERDP_LO, XHCI_INTR_REG_ERSTBA_LO, XHCI_INTR_REG_ERSTSZ,
-            XHCI_INTR_REG_IMAN, XHCI_INTR_REG_IMOD, XHCI_INTR_REG_SIZE, XHCI_OPER_REG_CONFIG,
-            XHCI_OPER_REG_PAGESIZE, XHCI_OPER_REG_USBCMD, XHCI_OPER_REG_USBSTS,
+            XHCI_INTR_REG_IMAN, XHCI_INTR_REG_SIZE, XHCI_OPER_REG_CONFIG, XHCI_OPER_REG_PAGESIZE,
+            XHCI_OPER_REG_USBCMD, XHCI_OPER_REG_USBSTS,
         },
-        xhci_trb::{TRBCCode, TRBType, TRB_SIZE},
+        TRBCCode, TRBType, TRB_SIZE,
     },
-    UsbDeviceRequest,
 };
-use util::byte_code::ByteCode;
 
 pub const PCI_VENDOR_ID_REDHAT: u16 = 0x1b36;
 pub const PCI_DEVICE_ID_REDHAT_XHCI: u16 = 0x000d;
@@ -87,7 +85,7 @@ const TRB_BSR_MASK: u32 = 0x1;
 const TRB_TD_SIZE_SHIFT: u32 = 9;
 const TRB_TD_SIZE_MASK: u32 = 0x1;
 const TRB_TRANSFER_LENGTH_SHIFT: u32 = 0;
-const TRB_TRANSFER_LENGTH_MASK: u32 = 0x1ffff;
+const TRB_TRANSFER_LENGTH_MASK: u32 = 0xffff;
 const TRB_IOC_SHIFT: u32 = 5;
 const TRB_IOC_MASK: u32 = 0x1;
 const TRB_CH_SHIFT: u32 = 4;
@@ -108,10 +106,9 @@ const DEVICE_CONTEXT_SIZE: u64 = 0x400;
 const INPUT_CONTEXT_SIZE: u64 = 0x420;
 pub const CONTROL_ENDPOINT_ID: u32 = 1;
 pub const HID_KEYBOARD_LEN: u64 = 8;
-pub const HID_POINTER_LEN: u64 = 7;
+pub const HID_POINTER_LEN: u64 = 6;
 pub const KEYCODE_SPACE: u32 = 57;
 pub const KEYCODE_NUM1: u32 = 2;
-const HID_POINTER_REPORT_LEN: u8 = 89;
 // Descriptor type
 pub const USB_DESCRIPTOR_TYPE_DEVICE: u8 = 1;
 pub const USB_DESCRIPTOR_TYPE_CONFIG: u8 = 2;
@@ -129,27 +126,10 @@ pub const TRANSFER_RING_LEN: u64 = 256;
 pub const TD_TRB_LIMIT: u64 = 0x20000 + 10;
 // The USB keyboard and tablet intr endpoint id.
 pub const HID_DEVICE_ENDPOINT_ID: u32 = 3;
-pub const STORAGE_DEVICE_IN_ENDPOINT_ID: u32 = 3;
-pub const STORAGE_DEVICE_OUT_ENDPOINT_ID: u32 = 4;
 // Primary Interrupter
 pub const PRIMARY_INTERRUPTER_ID: usize = 0;
 pub const XHCI_PCI_SLOT_NUM: u8 = 0x5;
 pub const XHCI_PCI_FUN_NUM: u8 = 0;
-const INTERFACE_ID_CONTROL: u8 = 0;
-// According to UVC specification 1.5
-// A.2. Video Interface Subclass Codes
-const SC_VIDEOCONTROL: u8 = 0x01;
-const SC_VIDEOSTREAMING: u8 = 0x02;
-const SC_VIDEO_INTERFACE_COLLECTION: u8 = 0x03;
-
-#[derive(Eq, PartialEq)]
-enum UsbDeviceType {
-    Tablet,
-    Keyboard,
-    Storage,
-    Camera,
-    Other,
-}
 
 #[derive(Debug, Default, Copy, Clone)]
 pub struct TestNormalTRB {
@@ -161,17 +141,6 @@ pub struct TestNormalTRB {
 }
 
 impl TestNormalTRB {
-    pub fn generate_normal_td(target: u32, len: u32) -> TestNormalTRB {
-        let mut trb = TestNormalTRB::default();
-        trb.set_ioc_flag(true);
-        trb.set_isp_flag(true);
-        trb.set_idt_flag(true);
-        trb.set_interrupter_target(target);
-        trb.set_trb_type(TRBType::TrNormal as u32);
-        trb.set_trb_transfer_length(len);
-        trb
-    }
-
     pub fn generate_setup_td(device_req: &UsbDeviceRequest) -> TestNormalTRB {
         let mut setup_trb = TestNormalTRB::default();
         setup_trb.parameter = (device_req.length as u64) << 48
@@ -535,7 +504,6 @@ impl TestXhciPciDevice {
     }
 
     pub fn init_device(&mut self, port_id: u32) -> u32 {
-        let usb_device_type = self.get_usb_device_type();
         // reset usb port
         self.reset_port(port_id);
         let evt = self.fetch_event(PRIMARY_INTERRUPTER_ID).unwrap();
@@ -606,20 +574,7 @@ impl TestXhciPciDevice {
         let evt = self.fetch_event(PRIMARY_INTERRUPTER_ID).unwrap();
         assert_eq!(evt.ccode, TRBCCode::ShortPacket as u32);
         let buf = self.get_transfer_data_indirect(evt.ptr - 16, 2);
-
-        match usb_device_type {
-            UsbDeviceType::Tablet | UsbDeviceType::Keyboard => {
-                assert_eq!(buf, [2, 0]);
-            }
-            UsbDeviceType::Storage => {
-                assert_eq!(buf, [3, 0]);
-            }
-            UsbDeviceType::Camera => {
-                assert_eq!(buf, [2, 0]);
-            }
-            _ => {}
-        }
-
+        assert_eq!(buf, [2, 0]);
         slot_id
     }
 
@@ -718,7 +673,7 @@ impl TestXhciPciDevice {
 
     pub fn init_pci_device(&mut self, pci_slot: u8, pci_fn: u8) {
         let devfn = pci_slot << 3 | pci_fn;
-        assert!(self.pci_dev.find_pci_device(devfn));
+        assert!(self.find_pci_device(devfn));
 
         self.pci_dev.enable();
         self.bar_addr = self.pci_dev.io_map(self.bar_idx);
@@ -747,7 +702,7 @@ impl TestXhciPciDevice {
         let hcsparams1 = self
             .pci_dev
             .io_readl(self.bar_addr, (XHCI_PCI_CAP_OFFSET + 0x4) as u64);
-        assert_eq!(hcsparams1 & 0xffffff, 0x000140);
+        assert_eq!(hcsparams1, 0x08001040);
         // HCSPARAMS2
         let hcsparams2 = self
             .pci_dev
@@ -764,16 +719,6 @@ impl TestXhciPciDevice {
             .io_readl(self.bar_addr, (XHCI_PCI_CAP_OFFSET + 0x10) as u64);
         // AC64 = 1
         assert_eq!(hccparams1 & 1, 1);
-        // doorbell offset
-        let db_offset = self
-            .pci_dev
-            .io_readl(self.bar_addr, (XHCI_PCI_CAP_OFFSET + 0x14) as u64);
-        assert_eq!(db_offset, 0x2000);
-        // runtime offset
-        let runtime_offset = self
-            .pci_dev
-            .io_readl(self.bar_addr, (XHCI_PCI_CAP_OFFSET + 0x18) as u64);
-        assert_eq!(runtime_offset, 0x1000);
         // HCCPARAMS2
         let hccparams2 = self
             .pci_dev
@@ -791,12 +736,7 @@ impl TestXhciPciDevice {
         let usb2_port = self
             .pci_dev
             .io_readl(self.bar_addr, (XHCI_PCI_CAP_OFFSET + 0x28) as u64);
-        let usb2_port_num = (usb2_port >> 8) & 0xff;
-        // extend capability end
-        let end = self
-            .pci_dev
-            .io_readl(self.bar_addr, (XHCI_PCI_CAP_OFFSET + 0x2c) as u64);
-        assert_eq!(end, 0);
+        assert!(usb2_port & 0x400 == 0x400);
         // USB 3.0
         let usb3_version = self
             .pci_dev
@@ -809,17 +749,7 @@ impl TestXhciPciDevice {
         let usb3_port = self
             .pci_dev
             .io_readl(self.bar_addr, (XHCI_PCI_CAP_OFFSET + 0x38) as u64);
-        let usb3_port_num = (usb3_port >> 8) & 0xff;
-        // extend capability end
-        let end = self
-            .pci_dev
-            .io_readl(self.bar_addr, (XHCI_PCI_CAP_OFFSET + 0x3c) as u64);
-        assert_eq!(end, 0);
-        // Max ports
-        let hcsparams1 = self
-            .pci_dev
-            .io_readl(self.bar_addr, (XHCI_PCI_CAP_OFFSET + 0x4) as u64);
-        assert_eq!(hcsparams1 >> 24, usb2_port_num + usb3_port_num);
+        assert!(usb3_port & 0x400 == 0x400);
     }
 
     pub fn init_max_device_slot_enabled(&mut self) {
@@ -974,47 +904,12 @@ impl TestXhciPciDevice {
 
     // Return the address of input context to allow outside modify.
     pub fn configure_endpoint(&mut self, slot_id: u32, dc: bool) -> u64 {
-        let usb_device_type = self.get_usb_device_type();
-        let mut endpoint_id: Vec<u32> = Vec::new();
-        let mut endpoint_type: Vec<u32> = Vec::new();
-        let mut endpoint_offset: Vec<u64> = Vec::new();
-
-        match usb_device_type {
-            UsbDeviceType::Keyboard | UsbDeviceType::Tablet => {
-                endpoint_id.push(HID_DEVICE_ENDPOINT_ID);
-                endpoint_type.push(7);
-                endpoint_offset.push(0x80);
-            }
-            UsbDeviceType::Storage => {
-                endpoint_id.push(STORAGE_DEVICE_IN_ENDPOINT_ID);
-                endpoint_type.push(6);
-                endpoint_offset.push(0x80);
-                endpoint_id.push(STORAGE_DEVICE_OUT_ENDPOINT_ID);
-                endpoint_type.push(2);
-                endpoint_offset.push(0xa0);
-            }
-            UsbDeviceType::Camera => {
-                endpoint_id.push(3);
-                endpoint_type.push(6);
-                endpoint_offset.push(0x80);
-            }
-            _ => {
-                endpoint_id.push(3);
-                endpoint_type.push(2);
-                endpoint_offset.push(0x60);
-            }
-        }
-
         let output_ctx_addr = self.get_device_context_address(slot_id);
         // Input context.
         let input_ctx_addr = self.alloc_input_context();
         let mut input_ctx = XhciInputCtrlCtx::default();
-
-        for i in 0..endpoint_id.len() {
-            input_ctx.add_flags |= 0x1 | 1 << endpoint_id[i];
-            input_ctx.drop_flags |= 1 << endpoint_id[i];
-        }
-
+        input_ctx.add_flags |= 0x1 | 1 << HID_DEVICE_ENDPOINT_ID;
+        input_ctx.drop_flags = 1 << HID_DEVICE_ENDPOINT_ID;
         self.mem_write_u32(input_ctx_addr, input_ctx.as_dwords());
         // Slot context.
         let mut slot_ctx = XhciSlotCtx::default();
@@ -1032,18 +927,15 @@ impl TestXhciPciDevice {
         } else {
             TRB_SIZE as u64 * TRANSFER_RING_LEN
         };
-
-        for i in 0..endpoint_id.len() {
-            let ep_tr_ring = self.allocator.borrow_mut().alloc(tr_ring_size);
-            ep_ctx.set_tr_dequeue_pointer(ep_tr_ring | 1);
-            ep_ctx.set_interval(10);
-            ep_ctx.set_ep_state(0);
-            ep_ctx.set_ep_type(endpoint_type[i]);
-            self.mem_write_u32(input_ctx_addr + endpoint_offset[i], ep_ctx.as_dwords());
-            self.xhci.device_slot[slot_id as usize].endpoints[(endpoint_id[i] - 1) as usize]
-                .transfer_ring
-                .init(ep_tr_ring, tr_ring_size);
-        }
+        let ep_tr_ring = self.allocator.borrow_mut().alloc(tr_ring_size);
+        ep_ctx.set_tr_dequeue_pointer(ep_tr_ring | 1);
+        ep_ctx.set_interval(10);
+        ep_ctx.set_ep_state(0);
+        ep_ctx.set_ep_type(7);
+        self.mem_write_u32(input_ctx_addr + 0x80, ep_ctx.as_dwords());
+        self.xhci.device_slot[slot_id as usize].endpoints[(HID_DEVICE_ENDPOINT_ID - 1) as usize]
+            .transfer_ring
+            .init(ep_tr_ring, tr_ring_size);
 
         let mut trb = TestNormalTRB::default();
         trb.parameter = input_ctx_addr;
@@ -1151,7 +1043,7 @@ impl TestXhciPciDevice {
         self.event_list.pop_front()
     }
 
-    pub fn queue_device_request(&mut self, slot_id: u32, device_req: &UsbDeviceRequest) -> u64 {
+    pub fn queue_device_reqeust(&mut self, slot_id: u32, device_req: &UsbDeviceRequest) {
         // Setup Stage.
         let mut setup_trb = TestNormalTRB::generate_setup_td(&device_req);
         self.queue_trb(slot_id, CONTROL_ENDPOINT_ID, &mut setup_trb);
@@ -1164,7 +1056,6 @@ impl TestXhciPciDevice {
         // Status Stage.
         let mut status_trb = TestNormalTRB::generate_status_td(false);
         self.queue_trb(slot_id, CONTROL_ENDPOINT_ID, &mut status_trb);
-        ptr
     }
 
     // Queue TD with multi-TRB.
@@ -1205,11 +1096,16 @@ impl TestXhciPciDevice {
 
     // Queue TD (single TRB) with IDT=1
     pub fn queue_direct_td(&mut self, slot_id: u32, ep_id: u32, len: u64) {
-        let mut trb = TestNormalTRB::generate_normal_td(0, len as u32);
+        let mut trb = TestNormalTRB::default();
+        trb.set_ioc_flag(true);
+        trb.set_isp_flag(true);
+        trb.set_idt_flag(true);
+        trb.set_trb_type(TRBType::TrNormal as u32);
+        trb.set_trb_transfer_length(len as u32);
         self.queue_trb(slot_id, ep_id, &mut trb);
     }
 
-    // Queue multi-TD with IDT=1
+    // Queue multi-TD  with IDT=1
     pub fn queue_multi_direct_td(&mut self, slot_id: u32, ep_id: u32, sz: u64, num: usize) {
         for _ in 0..num {
             self.queue_direct_td(slot_id, ep_id, sz);
@@ -1218,7 +1114,7 @@ impl TestXhciPciDevice {
 
     // Queue TD (single TRB)
     pub fn queue_indirect_td(&mut self, slot_id: u32, ep_id: u32, sz: u64) -> u64 {
-        let mut trb = TestNormalTRB::generate_normal_td(0, sz as u32);
+        let mut trb = TestNormalTRB::default();
         let ptr = self.allocator.borrow_mut().alloc(sz);
         self.pci_dev
             .pci_bus
@@ -1227,7 +1123,10 @@ impl TestXhciPciDevice {
             .borrow_mut()
             .memset(ptr, sz, &[0]);
         trb.set_pointer(ptr);
-        trb.set_idt_flag(false);
+        trb.set_ioc_flag(true);
+        trb.set_isp_flag(true);
+        trb.set_trb_type(TRBType::TrNormal as u32);
+        trb.set_trb_transfer_length(sz as u32);
         self.queue_trb(slot_id, ep_id, &mut trb);
         ptr
     }
@@ -1292,9 +1191,6 @@ impl TestXhciPciDevice {
     }
 
     pub fn set_transfer_pointer(&mut self, ptr: u64, slot_id: u32, ep_id: u32) {
-        if self.check_slot_ep_invalid(slot_id, ep_id) {
-            return;
-        }
         self.xhci.device_slot[slot_id as usize].endpoints[(ep_id - 1) as usize]
             .transfer_ring
             .pointer = ptr;
@@ -1425,37 +1321,6 @@ impl TestXhciPciDevice {
         // enable INTE
         let value = self.interrupter_regs_read(intr_idx as u64, XHCI_INTR_REG_IMAN);
         self.interrupter_regs_write(intr_idx as u64, XHCI_INTR_REG_IMAN, value | IMAN_IE);
-        // set IMOD
-        self.interrupter_regs_write(intr_idx as u64, XHCI_INTR_REG_IMOD, 8);
-        let value = self.interrupter_regs_read(intr_idx as u64, XHCI_INTR_REG_IMOD);
-        assert_eq!(value, 8);
-    }
-
-    pub fn recovery_endpoint(&mut self, slot_id: u32, ep_id: u32) {
-        self.reset_endpoint(slot_id, ep_id);
-        let evt = self.fetch_event(PRIMARY_INTERRUPTER_ID).unwrap();
-        assert_eq!(evt.ccode, TRBCCode::Success as u32);
-    }
-
-    pub fn test_invalie_device_request(
-        &mut self,
-        slot_id: u32,
-        request_type: u8,
-        request: u8,
-        value: u16,
-    ) {
-        let device_req = UsbDeviceRequest {
-            request_type,
-            request,
-            value,
-            index: 0,
-            length: 64,
-        };
-        self.queue_device_request(slot_id, &device_req);
-        self.doorbell_write(slot_id, CONTROL_ENDPOINT_ID);
-        let evt = self.fetch_event(PRIMARY_INTERRUPTER_ID).unwrap();
-        assert_eq!(evt.ccode, TRBCCode::StallError as u32);
-        self.recovery_endpoint(slot_id, CONTROL_ENDPOINT_ID);
     }
 
     // Fake init memory.
@@ -1465,17 +1330,9 @@ impl TestXhciPciDevice {
     }
 
     fn get_cycle_bit(&self, slot_id: u32, ep_id: u32) -> bool {
-        if self.check_slot_ep_invalid(slot_id, ep_id) {
-            return false;
-        }
         self.xhci.device_slot[slot_id as usize].endpoints[(ep_id - 1) as usize]
             .transfer_ring
             .cycle_bit
-    }
-
-    fn check_slot_ep_invalid(&self, slot_id: u32, ep_id: u32) -> bool {
-        slot_id as usize >= self.xhci.device_slot.len()
-            || ep_id as usize > self.xhci.device_slot[slot_id as usize].endpoints.len()
     }
 
     fn increase_event_ring(&mut self, intr_idx: usize) {
@@ -1510,6 +1367,18 @@ impl TestXhciPciDevice {
         evt_seg.size = LittleEndian::read_u32(&evt_seg_buf[8..]);
         evt_seg.reserved = LittleEndian::read_u32(&evt_seg_buf[12..]);
         evt_seg
+    }
+
+    fn set_devfn(&mut self, devfn: u8) {
+        self.pci_dev.devfn = devfn;
+    }
+
+    fn find_pci_device(&mut self, devfn: u8) -> bool {
+        self.set_devfn(devfn);
+        if self.pci_dev.config_readw(PCI_VENDOR_ID) == 0xFFFF {
+            return false;
+        }
+        true
     }
 
     fn set_device_context_address(&mut self, slot_id: u32, addr: u64) {
@@ -1584,191 +1453,7 @@ impl TestXhciPciDevice {
 
 // Descriptor
 impl TestXhciPciDevice {
-    fn get_usb_device_type(&mut self) -> UsbDeviceType {
-        let usb_device_type = if *self.device_config.get("tablet").unwrap_or(&false) {
-            UsbDeviceType::Tablet
-        } else if *self.device_config.get("keyboard").unwrap_or(&false) {
-            UsbDeviceType::Keyboard
-        } else if *self.device_config.get("storage").unwrap_or(&false) {
-            UsbDeviceType::Storage
-        } else if *self.device_config.get("camera").unwrap_or(&false) {
-            UsbDeviceType::Camera
-        } else {
-            UsbDeviceType::Other
-        };
-
-        usb_device_type
-    }
-
-    fn get_iad_desc(&mut self, offset: &mut u64, addr: u64) {
-        let usb_device_type = self.get_usb_device_type();
-        if usb_device_type != UsbDeviceType::Camera {
-            return;
-        }
-
-        // 1. IAD header descriptor
-        *offset += USB_DT_CONFIG_SIZE as u64;
-        let buf = self.get_transfer_data_indirect_with_offset(addr, 8 as usize, *offset);
-
-        // descriptor type
-        assert_eq!(buf[1], USB_DT_INTERFACE_ASSOCIATION);
-        // class
-        assert_eq!(buf[4], USB_CLASS_VIDEO);
-        // subclass
-        assert_eq!(buf[5], SC_VIDEO_INTERFACE_COLLECTION);
-
-        // 2. VC interface
-        *offset += 8;
-        let buf = self.get_transfer_data_indirect_with_offset(
-            addr,
-            USB_DT_INTERFACE_SIZE as usize,
-            *offset,
-        );
-
-        assert_eq!(buf[1], USB_DT_INTERFACE);
-        assert_eq!(buf[2], INTERFACE_ID_CONTROL);
-        assert_eq!(buf[5], USB_CLASS_VIDEO);
-        assert_eq!(buf[6], SC_VIDEOCONTROL);
-
-        // get total vc length from its header descriptor
-        *offset += USB_DT_INTERFACE_SIZE as u64;
-        let buf = self.get_transfer_data_indirect_with_offset(addr, 0xd as usize, *offset);
-
-        let total = u16::from_le_bytes(buf[5..7].try_into().unwrap());
-        let remained = total - 0xd;
-
-        *offset += 0xd;
-        let _buf = self.get_transfer_data_indirect_with_offset(addr, remained as usize, *offset);
-
-        // 3. VS interface
-        *offset += remained as u64;
-        let buf = self.get_transfer_data_indirect_with_offset(
-            addr,
-            USB_DT_INTERFACE_SIZE as usize,
-            *offset,
-        );
-
-        assert_eq!(buf[1], USB_DT_INTERFACE);
-        assert_eq!(buf[5], USB_CLASS_VIDEO);
-        assert_eq!(buf[6], SC_VIDEOSTREAMING);
-
-        // get total vs length from its header descriptor
-        *offset += USB_DT_INTERFACE_SIZE as u64;
-        let buf = self.get_transfer_data_indirect_with_offset(addr, 0xf as usize, *offset);
-        let total = u16::from_le_bytes(buf[4..6].try_into().unwrap());
-        let remained = total - 0xf;
-
-        *offset += 0xf;
-        let _buf = self.get_transfer_data_indirect_with_offset(addr, remained as usize, *offset);
-    }
-
-    fn get_interfaces(&mut self, offset: &mut u64, addr: u64) {
-        let usb_device_type = self.get_usb_device_type();
-        if usb_device_type == UsbDeviceType::Camera {
-            return;
-        }
-
-        *offset += USB_DT_CONFIG_SIZE as u64;
-        let buf = self.get_transfer_data_indirect_with_offset(
-            addr,
-            USB_DT_INTERFACE_SIZE as usize,
-            *offset,
-        );
-        // descriptor type
-        assert_eq!(buf[1], USB_DESCRIPTOR_TYPE_INTERFACE);
-        // USB class
-        match usb_device_type {
-            UsbDeviceType::Tablet | UsbDeviceType::Keyboard => {
-                assert_eq!(buf[5], USB_CLASS_HID);
-            }
-            UsbDeviceType::Storage => {
-                assert_eq!(buf[5], USB_CLASS_MASS_STORAGE);
-                assert_eq!(buf[6], 0x06);
-                assert_eq!(buf[7], 0x50);
-            }
-            _ => {}
-        }
-
-        match usb_device_type {
-            UsbDeviceType::Tablet => {
-                // hid descriptor
-                *offset += USB_DT_INTERFACE_SIZE as u64;
-                let buf = self.get_transfer_data_indirect_with_offset(addr, 9, *offset);
-                assert_eq!(
-                    buf,
-                    [
-                        0x9,
-                        0x21,
-                        0x01,
-                        0x0,
-                        0x0,
-                        0x01,
-                        0x22,
-                        HID_POINTER_REPORT_LEN,
-                        0x0
-                    ]
-                );
-            }
-            UsbDeviceType::Keyboard => {
-                // hid descriptor
-                *offset += USB_DT_INTERFACE_SIZE as u64;
-                let buf = self.get_transfer_data_indirect_with_offset(addr, 9, *offset);
-                assert_eq!(buf, [0x09, 0x21, 0x11, 0x01, 0x00, 0x01, 0x22, 0x3f, 0]);
-            }
-            _ => {}
-        }
-
-        *offset += USB_DT_INTERFACE_SIZE as u64;
-        // endpoint descriptor
-        let buf = self.get_transfer_data_indirect_with_offset(
-            addr,
-            USB_DT_ENDPOINT_SIZE as usize,
-            *offset,
-        );
-
-        match usb_device_type {
-            UsbDeviceType::Tablet | UsbDeviceType::Keyboard => {
-                // descriptor type
-                assert_eq!(buf[1], USB_DESCRIPTOR_TYPE_ENDPOINT);
-                // endpoint address
-                assert_eq!(buf[2], USB_DIRECTION_DEVICE_TO_HOST | 0x1);
-            }
-            UsbDeviceType::Storage => {
-                // descriptor type
-                assert_eq!(buf[1], USB_DESCRIPTOR_TYPE_ENDPOINT);
-                // endpoint address
-                assert_eq!(buf[2], USB_DIRECTION_DEVICE_TO_HOST | 0x01);
-                *offset += USB_DT_ENDPOINT_SIZE as u64;
-                // endpoint descriptor
-                let buf = self.get_transfer_data_indirect_with_offset(
-                    addr,
-                    USB_DT_ENDPOINT_SIZE as usize,
-                    *offset,
-                );
-                // descriptor type
-                assert_eq!(buf[1], USB_DESCRIPTOR_TYPE_ENDPOINT);
-                // endpoint address
-                assert_eq!(buf[2], USB_DIRECTION_HOST_TO_DEVICE | 0x02);
-            }
-            _ => {}
-        }
-    }
-
-    fn check_string_descriptor(&mut self, slot_id: u32, name_idx: u16, name: &str) {
-        self.get_string_descriptor(slot_id, name_idx);
-        self.doorbell_write(slot_id, CONTROL_ENDPOINT_ID);
-        let evt = self.fetch_event(PRIMARY_INTERRUPTER_ID).unwrap();
-        assert_eq!(evt.ccode, TRBCCode::ShortPacket as u32);
-
-        let len = name.len() * 2 + 2;
-        let buf = self.get_transfer_data_indirect(evt.ptr - TRB_SIZE as u64, len as u64);
-        for i in 0..name.len() {
-            assert_eq!(buf[2 * i + 2], name.as_bytes()[i]);
-        }
-    }
-
     pub fn get_usb_descriptor(&mut self, slot_id: u32) {
-        let usb_device_type = self.get_usb_device_type();
         // device descriptor
         self.get_device_descriptor(slot_id);
         self.doorbell_write(slot_id, CONTROL_ENDPOINT_ID);
@@ -1779,18 +1464,7 @@ impl TestXhciPciDevice {
         // descriptor type
         assert_eq!(buf[1], USB_DESCRIPTOR_TYPE_DEVICE);
         // bcdUSB
-        match usb_device_type {
-            UsbDeviceType::Tablet | UsbDeviceType::Keyboard => {
-                assert_eq!(buf[2..4], [0, 1]);
-            }
-            UsbDeviceType::Storage => {
-                assert_eq!(buf[2..4], [0, 2]);
-            }
-            UsbDeviceType::Camera => {
-                assert_eq!(buf[2..4], [0, 3]);
-            }
-            _ => {}
-        }
+        assert_eq!(buf[3..5], [1, 0]);
         // config descriptor
         self.get_config_descriptor(slot_id);
         self.doorbell_write(slot_id, CONTROL_ENDPOINT_ID);
@@ -1804,10 +1478,36 @@ impl TestXhciPciDevice {
         assert_eq!(buf[1], USB_DESCRIPTOR_TYPE_CONFIG);
         // configure value
         assert_eq!(buf[5], 1);
-
-        self.get_iad_desc(&mut offset, addr);
-        self.get_interfaces(&mut offset, addr);
-
+        offset += USB_DT_CONFIG_SIZE as u64;
+        let buf = self.get_transfer_data_indirect_with_offset(
+            addr,
+            USB_DT_INTERFACE_SIZE as usize,
+            offset,
+        );
+        // descriptor type
+        assert_eq!(buf[1], USB_DESCRIPTOR_TYPE_INTERFACE);
+        // hid class
+        assert_eq!(buf[5], 3);
+        // hid descriptor
+        offset += USB_DT_INTERFACE_SIZE as u64;
+        if *self.device_config.get("tablet").unwrap_or(&false) {
+            let buf = self.get_transfer_data_indirect_with_offset(addr, 9, offset);
+            assert_eq!(buf, [0x9, 0x21, 0x01, 0x0, 0x0, 0x01, 0x22, 74, 0x0]);
+        } else if *self.device_config.get("keyboard").unwrap_or(&false) {
+            let buf = self.get_transfer_data_indirect_with_offset(addr, 9, offset);
+            assert_eq!(buf, [0x09, 0x21, 0x11, 0x01, 0x00, 0x01, 0x22, 0x3f, 0]);
+        }
+        offset += 9;
+        // endpoint descriptor
+        let buf = self.get_transfer_data_indirect_with_offset(
+            addr,
+            USB_DT_ENDPOINT_SIZE as usize,
+            offset,
+        );
+        // descriptor type
+        assert_eq!(buf[1], USB_DESCRIPTOR_TYPE_ENDPOINT);
+        // endpoint address
+        assert_eq!(buf[2], USB_DIRECTION_DEVICE_TO_HOST | 0x1);
         // string descriptor
         self.get_string_descriptor(slot_id, 0);
         self.doorbell_write(slot_id, CONTROL_ENDPOINT_ID);
@@ -1816,69 +1516,61 @@ impl TestXhciPciDevice {
         let buf = self.get_transfer_data_indirect(evt.ptr - 16, 4);
         // Language ID
         assert_eq!(buf, [4, 3, 9, 4]);
-
-        match usb_device_type {
-            UsbDeviceType::Tablet => {
-                self.check_string_descriptor(slot_id, 3, "HID Tablet");
+        self.get_string_descriptor(slot_id, 3);
+        self.doorbell_write(slot_id, CONTROL_ENDPOINT_ID);
+        let evt = self.fetch_event(PRIMARY_INTERRUPTER_ID).unwrap();
+        assert_eq!(evt.ccode, TRBCCode::ShortPacket as u32);
+        if *self.device_config.get("tablet").unwrap_or(&false) {
+            let hid_str = "HID Tablet";
+            let len = hid_str.len() * 2 + 2;
+            let buf = self.get_transfer_data_indirect(evt.ptr - TRB_SIZE as u64, len as u64);
+            for i in 0..hid_str.len() {
+                assert_eq!(buf[2 * i + 2], hid_str.as_bytes()[i]);
             }
-            UsbDeviceType::Keyboard => {
-                self.check_string_descriptor(slot_id, 3, "HID Keyboard");
+        } else if *self.device_config.get("keyboard").unwrap_or(&false) {
+            let hid_str = "HID Keyboard";
+            let len = hid_str.len() * 2 + 2;
+            let buf = self.get_transfer_data_indirect(evt.ptr - TRB_SIZE as u64, len as u64);
+            for i in 0..hid_str.len() {
+                assert_eq!(buf[2 * i + 2], hid_str.as_bytes()[i]);
             }
-            UsbDeviceType::Storage => {
-                self.check_string_descriptor(slot_id, 2, "StratoVirt USB Storage");
-            }
-            UsbDeviceType::Camera => {
-                self.check_string_descriptor(slot_id, 2, "USB Camera");
-            }
-            _ => {}
         }
     }
 
     pub fn check_hid_report_descriptor(&mut self, slot_id: u32) {
-        let usb_device_type = self.get_usb_device_type();
-        match usb_device_type {
-            UsbDeviceType::Keyboard => {
-                self.get_hid_report_descriptor(slot_id, 63);
-                self.doorbell_write(slot_id, CONTROL_ENDPOINT_ID);
-                let evt = self.fetch_event(PRIMARY_INTERRUPTER_ID).unwrap();
-                assert_eq!(evt.ccode, TRBCCode::Success as u32);
-                let buf = self.get_transfer_data_indirect(evt.ptr - TRB_SIZE as u64, 63);
-                assert_eq!(
-                    buf,
-                    [
-                        0x05, 0x01, 0x09, 0x06, 0xa1, 0x01, 0x75, 0x01, 0x95, 0x08, 0x05, 0x07,
-                        0x19, 0xe0, 0x29, 0xe7, 0x15, 0x00, 0x25, 0x01, 0x81, 0x02, 0x95, 0x01,
-                        0x75, 0x08, 0x81, 0x01, 0x95, 0x05, 0x75, 0x01, 0x05, 0x08, 0x19, 0x01,
-                        0x29, 0x05, 0x91, 0x02, 0x95, 0x01, 0x75, 0x03, 0x91, 0x01, 0x95, 0x06,
-                        0x75, 0x08, 0x15, 0x00, 0x25, 0xff, 0x05, 0x07, 0x19, 0x00, 0x29, 0xff,
-                        0x81, 0x00, 0xc0
-                    ]
-                );
-            }
-            UsbDeviceType::Tablet => {
-                self.get_hid_report_descriptor(slot_id, HID_POINTER_REPORT_LEN as u16);
-                self.doorbell_write(slot_id, CONTROL_ENDPOINT_ID);
-                let evt = self.fetch_event(PRIMARY_INTERRUPTER_ID).unwrap();
-                assert_eq!(evt.ccode, TRBCCode::Success as u32);
-                let buf = self.get_transfer_data_indirect(
-                    evt.ptr - TRB_SIZE as u64,
-                    HID_POINTER_REPORT_LEN as u64,
-                );
-                assert_eq!(
-                    buf,
-                    [
-                        0x05, 0x01, 0x09, 0x02, 0xa1, 0x01, 0x09, 0x01, 0xa1, 0x00, 0x05, 0x09,
-                        0x19, 0x01, 0x29, 0x05, 0x15, 0x00, 0x25, 0x01, 0x95, 0x05, 0x75, 0x01,
-                        0x81, 0x02, 0x95, 0x01, 0x75, 0x03, 0x81, 0x01, 0x05, 0x01, 0x09, 0x30,
-                        0x09, 0x31, 0x15, 0x00, 0x26, 0xff, 0x7f, 0x35, 0x00, 0x46, 0xff, 0x7f,
-                        0x75, 0x10, 0x95, 0x02, 0x81, 0x02, 0x05, 0x01, 0x09, 0x38, 0x15, 0x81,
-                        0x25, 0x7f, 0x35, 0x00, 0x45, 0x00, 0x75, 0x08, 0x95, 0x01, 0x81, 0x06,
-                        0x05, 0x0c, 0x0a, 0x38, 0x02, 0x15, 0x81, 0x25, 0x7f, 0x75, 0x08, 0x95,
-                        0x01, 0x81, 0x06, 0xc0, 0xc0,
-                    ]
-                );
-            }
-            _ => {}
+        if *self.device_config.get("keyboard").unwrap_or(&false) {
+            self.get_hid_report_descriptor(slot_id, 63);
+            self.doorbell_write(slot_id, CONTROL_ENDPOINT_ID);
+            let evt = self.fetch_event(PRIMARY_INTERRUPTER_ID).unwrap();
+            assert_eq!(evt.ccode, TRBCCode::Success as u32);
+            let buf = self.get_transfer_data_indirect(evt.ptr - TRB_SIZE as u64, 63);
+            assert_eq!(
+                buf,
+                [
+                    0x05, 0x01, 0x09, 0x06, 0xa1, 0x01, 0x75, 0x01, 0x95, 0x08, 0x05, 0x07, 0x19,
+                    0xe0, 0x29, 0xe7, 0x15, 0x00, 0x25, 0x01, 0x81, 0x02, 0x95, 0x01, 0x75, 0x08,
+                    0x81, 0x01, 0x95, 0x05, 0x75, 0x01, 0x05, 0x08, 0x19, 0x01, 0x29, 0x05, 0x91,
+                    0x02, 0x95, 0x01, 0x75, 0x03, 0x91, 0x01, 0x95, 0x06, 0x75, 0x08, 0x15, 0x00,
+                    0x25, 0xff, 0x05, 0x07, 0x19, 0x00, 0x29, 0xff, 0x81, 0x00, 0xc0
+                ]
+            );
+        } else if *self.device_config.get("tablet").unwrap_or(&false) {
+            self.get_hid_report_descriptor(slot_id, 74);
+            self.doorbell_write(slot_id, CONTROL_ENDPOINT_ID);
+            let evt = self.fetch_event(PRIMARY_INTERRUPTER_ID).unwrap();
+            assert_eq!(evt.ccode, TRBCCode::Success as u32);
+            let buf = self.get_transfer_data_indirect(evt.ptr - TRB_SIZE as u64, 74);
+            assert_eq!(
+                buf,
+                [
+                    0x05, 0x01, 0x09, 0x02, 0xa1, 0x01, 0x09, 0x01, 0xa1, 0x00, 0x05, 0x09, 0x19,
+                    0x01, 0x29, 0x03, 0x15, 0x00, 0x25, 0x01, 0x95, 0x03, 0x75, 0x01, 0x81, 0x02,
+                    0x95, 0x01, 0x75, 0x05, 0x81, 0x01, 0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x15,
+                    0x00, 0x26, 0xff, 0x7f, 0x35, 0x00, 0x46, 0xff, 0x7f, 0x75, 0x10, 0x95, 0x02,
+                    0x81, 0x02, 0x05, 0x01, 0x09, 0x38, 0x15, 0x81, 0x25, 0x7f, 0x35, 0x00, 0x45,
+                    0x00, 0x75, 0x08, 0x95, 0x01, 0x81, 0x06, 0xc0, 0xc0,
+                ]
+            );
         }
     }
 
@@ -1891,11 +1583,11 @@ impl TestXhciPciDevice {
             index: 0,
             length: buf_len,
         };
-        self.queue_device_request(slot_id, &device_req);
+        self.queue_device_reqeust(slot_id, &device_req);
     }
 
     pub fn get_config_descriptor(&mut self, slot_id: u32) {
-        let buf_len = 4096;
+        let buf_len = 64;
         let device_req = UsbDeviceRequest {
             request_type: USB_DEVICE_IN_REQUEST,
             request: USB_REQUEST_GET_DESCRIPTOR,
@@ -1903,7 +1595,7 @@ impl TestXhciPciDevice {
             index: 0,
             length: buf_len,
         };
-        self.queue_device_request(slot_id, &device_req);
+        self.queue_device_reqeust(slot_id, &device_req);
     }
 
     pub fn get_string_descriptor(&mut self, slot_id: u32, index: u16) {
@@ -1915,7 +1607,7 @@ impl TestXhciPciDevice {
             index: 0,
             length: buf_len,
         };
-        self.queue_device_request(slot_id, &device_req);
+        self.queue_device_reqeust(slot_id, &device_req);
     }
 
     pub fn get_status(&mut self, slot_id: u32) {
@@ -1927,7 +1619,7 @@ impl TestXhciPciDevice {
             index: 0,
             length: buf_len,
         };
-        self.queue_device_request(slot_id, &device_req);
+        self.queue_device_reqeust(slot_id, &device_req);
     }
 
     pub fn get_configuration(&mut self, slot_id: u32) {
@@ -1939,7 +1631,7 @@ impl TestXhciPciDevice {
             index: 0,
             length: buf_len,
         };
-        self.queue_device_request(slot_id, &device_req);
+        self.queue_device_reqeust(slot_id, &device_req);
     }
 
     pub fn set_configuration(&mut self, slot_id: u32, v: u16) {
@@ -1951,7 +1643,7 @@ impl TestXhciPciDevice {
             index: 0,
             length: buf_len,
         };
-        self.queue_device_request(slot_id, &device_req);
+        self.queue_device_reqeust(slot_id, &device_req);
     }
 
     pub fn clear_feature(&mut self, slot_id: u32, v: u16) {
@@ -1963,7 +1655,7 @@ impl TestXhciPciDevice {
             index: 0,
             length: buf_len,
         };
-        self.queue_device_request(slot_id, &device_req);
+        self.queue_device_reqeust(slot_id, &device_req);
     }
 
     pub fn set_feature(&mut self, slot_id: u32, v: u16) {
@@ -1975,7 +1667,7 @@ impl TestXhciPciDevice {
             index: 0,
             length: buf_len,
         };
-        self.queue_device_request(slot_id, &device_req);
+        self.queue_device_reqeust(slot_id, &device_req);
     }
 
     pub fn get_interface(&mut self, slot_id: u32, index: u16) {
@@ -1984,10 +1676,10 @@ impl TestXhciPciDevice {
             request_type: USB_INTERFACE_IN_REQUEST,
             request: USB_REQUEST_GET_INTERFACE,
             value: 0,
-            index,
+            index: index,
             length: buf_len,
         };
-        self.queue_device_request(slot_id, &device_req);
+        self.queue_device_reqeust(slot_id, &device_req);
     }
 
     pub fn set_interface(&mut self, slot_id: u32, v: u16, index: u16) {
@@ -1996,10 +1688,10 @@ impl TestXhciPciDevice {
             request_type: USB_INTERFACE_OUT_REQUEST,
             request: USB_REQUEST_SET_INTERFACE,
             value: v,
-            index,
+            index: index,
             length: buf_len,
         };
-        self.queue_device_request(slot_id, &device_req);
+        self.queue_device_reqeust(slot_id, &device_req);
     }
 
     pub fn get_hid_report_descriptor(&mut self, slot_id: u32, len: u16) {
@@ -2010,7 +1702,7 @@ impl TestXhciPciDevice {
             index: 0,
             length: len,
         };
-        self.queue_device_request(slot_id, &device_req);
+        self.queue_device_reqeust(slot_id, &device_req);
     }
 
     pub fn get_report(&mut self, slot_id: u32) {
@@ -2022,7 +1714,7 @@ impl TestXhciPciDevice {
             index: 0,
             length: buf_len,
         };
-        self.queue_device_request(slot_id, &device_req);
+        self.queue_device_reqeust(slot_id, &device_req);
     }
 
     pub fn set_report(&mut self, slot_id: u32, v: u16) {
@@ -2035,7 +1727,7 @@ impl TestXhciPciDevice {
             index: 0,
             length: buf_len,
         };
-        self.queue_device_request(slot_id, &device_req);
+        self.queue_device_reqeust(slot_id, &device_req);
     }
 
     pub fn get_protocol(&mut self, slot_id: u32) {
@@ -2046,7 +1738,7 @@ impl TestXhciPciDevice {
             index: 0,
             length: 1,
         };
-        self.queue_device_request(slot_id, &device_req);
+        self.queue_device_reqeust(slot_id, &device_req);
     }
 
     pub fn set_protocol(&mut self, slot_id: u32, v: u16) {
@@ -2057,7 +1749,7 @@ impl TestXhciPciDevice {
             index: 0,
             length: 0,
         };
-        self.queue_device_request(slot_id, &device_req);
+        self.queue_device_reqeust(slot_id, &device_req);
     }
 
     pub fn get_idle(&mut self, slot_id: u32) {
@@ -2068,7 +1760,7 @@ impl TestXhciPciDevice {
             index: 0,
             length: 1,
         };
-        self.queue_device_request(slot_id, &device_req);
+        self.queue_device_reqeust(slot_id, &device_req);
     }
 
     pub fn set_idle(&mut self, slot_id: u32, v: u16) {
@@ -2079,7 +1771,7 @@ impl TestXhciPciDevice {
             index: 0,
             length: 0,
         };
-        self.queue_device_request(slot_id, &device_req);
+        self.queue_device_reqeust(slot_id, &device_req);
     }
 }
 
@@ -2101,18 +1793,18 @@ impl TestXhciPciDevice {
     }
 
     pub fn test_pointer_event(&mut self, slot_id: u32, test_state: Rc<RefCell<TestState>>) {
-        qmp_send_pointer_event(test_state.borrow_mut(), 100, 200, 0, true);
-        qmp_send_pointer_event(test_state.borrow_mut(), 200, 100, 1, true);
+        qmp_send_pointer_event(test_state.borrow_mut(), 100, 200, 0);
+        qmp_send_pointer_event(test_state.borrow_mut(), 200, 100, 1);
         self.queue_multi_indirect_td(slot_id, HID_DEVICE_ENDPOINT_ID, HID_POINTER_LEN, 2);
         self.doorbell_write(slot_id, HID_DEVICE_ENDPOINT_ID);
         let evt = self.fetch_event(PRIMARY_INTERRUPTER_ID).unwrap();
         assert_eq!(evt.ccode, TRBCCode::Success as u32);
         let buf = self.get_transfer_data_indirect(evt.ptr, HID_POINTER_LEN);
-        assert_eq!(buf, [0, 100, 0, 200, 0, 0, 0]);
+        assert_eq!(buf, [0, 100, 0, 200, 0, 0]);
         let evt = self.fetch_event(PRIMARY_INTERRUPTER_ID).unwrap();
         assert_eq!(evt.ccode, TRBCCode::Success as u32);
         let buf = self.get_transfer_data_indirect(evt.ptr, HID_POINTER_LEN);
-        assert_eq!(buf, [1, 200, 0, 100, 0, 0, 0]);
+        assert_eq!(buf, [1, 200, 0, 100, 0, 0]);
     }
 }
 
@@ -2155,164 +1847,6 @@ impl TestXhciPciDevice {
     }
 }
 
-#[allow(non_snake_case)]
-#[repr(C, packed)]
-#[derive(Copy, Clone, Debug, Default)]
-pub struct VideoStreamingControl {
-    pub bmHint: u16,
-    pub bFormatIndex: u8,
-    pub bFrameIndex: u8,
-    pub dwFrameInterval: u32,
-    pub wKeyFrameRate: u16,
-    pub wPFrameRate: u16,
-    pub wCompQuality: u16,
-    pub wCompWindowSize: u16,
-    pub wDelay: u16,
-    pub dwMaxVideoFrameSize: u32,
-    pub dwMaxPayloadTransferSize: u32,
-}
-
-impl ByteCode for VideoStreamingControl {}
-const SET_CUR: u8 = 0x1;
-const VS_PROBE_CONTROL: u8 = 1;
-const VS_COMMIT_CONTROL: u8 = 2;
-const VS_INTERFACE_NUM: u16 = 1;
-const GET_CUR: u8 = 0x81;
-const GET_INFO: u8 = 0x86;
-
-const TRB_MAX_LEN: u32 = 64 * 1024;
-const FRAME_WAIT_MS: u64 = 20;
-
-// USB Camera
-impl TestXhciPciDevice {
-    pub fn vs_get_info(&mut self, slot_id: u32) -> u8 {
-        let device_req = UsbDeviceRequest {
-            request_type: USB_INTERFACE_CLASS_IN_REQUEST,
-            request: GET_INFO,
-            value: (VS_PROBE_CONTROL as u16) << 8,
-            index: VS_INTERFACE_NUM,
-            length: 1,
-        };
-        self.queue_device_request(slot_id, &device_req);
-        self.doorbell_write(slot_id, CONTROL_ENDPOINT_ID);
-        let evt = self.fetch_event(PRIMARY_INTERRUPTER_ID).unwrap();
-        assert_eq!(evt.ccode, TRBCCode::Success as u32);
-        let buf = self.get_transfer_data_indirect(evt.ptr - TRB_SIZE as u64, 1);
-        buf[0]
-    }
-
-    pub fn vs_get_cur(&mut self, slot_id: u32) -> VideoStreamingControl {
-        let len = std::mem::size_of::<VideoStreamingControl>() as u16;
-        let device_req = UsbDeviceRequest {
-            request_type: USB_INTERFACE_CLASS_IN_REQUEST,
-            request: GET_CUR,
-            value: (VS_PROBE_CONTROL as u16) << 8,
-            index: VS_INTERFACE_NUM,
-            length: len,
-        };
-        self.queue_device_request(slot_id, &device_req);
-        self.doorbell_write(slot_id, CONTROL_ENDPOINT_ID);
-        let evt = self.fetch_event(PRIMARY_INTERRUPTER_ID).unwrap();
-        assert_eq!(evt.ccode, TRBCCode::Success as u32);
-        let buf = self.get_transfer_data_indirect(evt.ptr - TRB_SIZE as u64, len as u64);
-        let mut vs_control = VideoStreamingControl::default();
-        vs_control.as_mut_bytes().copy_from_slice(&buf);
-        vs_control
-    }
-
-    pub fn vs_probe_control(&mut self, slot_id: u32, fmt_idx: u8, frm_idx: u8) {
-        let mut vs: VideoStreamingControl = VideoStreamingControl::default();
-        let len = std::mem::size_of::<VideoStreamingControl>() as u16;
-        vs.bFormatIndex = fmt_idx;
-        vs.bFrameIndex = frm_idx;
-        let device_req = UsbDeviceRequest {
-            request_type: USB_INTERFACE_CLASS_OUT_REQUEST,
-            request: SET_CUR,
-            value: (VS_PROBE_CONTROL as u16) << 8,
-            index: VS_INTERFACE_NUM,
-            length: len,
-        };
-        let data_ptr = self.queue_device_request(slot_id, &device_req);
-        self.mem_write(data_ptr, vs.as_bytes());
-    }
-
-    pub fn vs_commit_control(&mut self, slot_id: u32, fmt_idx: u8, frm_idx: u8) {
-        let mut vs = VideoStreamingControl::default();
-        vs.bFormatIndex = fmt_idx;
-        vs.bFrameIndex = frm_idx;
-        let device_req = UsbDeviceRequest {
-            request_type: USB_INTERFACE_CLASS_OUT_REQUEST,
-            request: SET_CUR,
-            value: (VS_COMMIT_CONTROL as u16) << 8,
-            index: VS_INTERFACE_NUM,
-            length: 0,
-        };
-        let data_ptr = self.queue_device_request(slot_id, &device_req);
-        self.mem_write(data_ptr, vs.as_bytes());
-    }
-
-    pub fn vs_clear_feature(&mut self, slot_id: u32) {
-        let device_req = UsbDeviceRequest {
-            request_type: USB_ENDPOINT_OUT_REQUEST,
-            request: USB_REQUEST_CLEAR_FEATURE,
-            value: 0,
-            index: 0,
-            length: 0,
-        };
-        self.queue_device_request(slot_id, &device_req);
-    }
-
-    pub fn get_payload(
-        &mut self,
-        slot_id: u32,
-        ep_id: u32,
-        frame_len: u32,
-        header_len: u32,
-        max_payload: u32,
-    ) -> Vec<Vec<u8>> {
-        let sz = max_payload - header_len;
-        let payload_cnt = frame_len + sz - 1 / sz;
-        let mut image = Vec::new();
-        for _ in 0..payload_cnt {
-            let (done, buf) = self.do_payload_transfer(slot_id, ep_id, max_payload);
-            image.push(buf);
-            if done {
-                break;
-            }
-        }
-        image
-    }
-
-    fn do_payload_transfer(&mut self, slot_id: u32, ep_id: u32, total: u32) -> (bool, Vec<u8>) {
-        let cnt = (total + TRB_MAX_LEN - 1) / TRB_MAX_LEN;
-        let mut data = Vec::new();
-        for _ in 0..cnt {
-            self.queue_indirect_td(slot_id, ep_id, TRB_MAX_LEN as u64);
-            self.doorbell_write(slot_id, ep_id);
-            // wait for frame done.
-            std::thread::sleep(std::time::Duration::from_millis(FRAME_WAIT_MS));
-            let evt = self.fetch_event(PRIMARY_INTERRUPTER_ID).unwrap();
-            if evt.ccode == TRBCCode::Success as u32 {
-                let mut buf = self.get_transfer_data_indirect(evt.ptr, TRB_MAX_LEN as u64);
-                data.append(&mut buf);
-            } else if evt.ccode == TRBCCode::ShortPacket as u32 {
-                let copied = (TRB_MAX_LEN - evt.length) as u64;
-                let mut buf = self.get_transfer_data_indirect(evt.ptr, copied);
-                data.append(&mut buf);
-                if total == data.len() as u32 {
-                    return (false, data);
-                } else {
-                    return (true, data);
-                }
-            } else {
-                assert_eq!(evt.ccode, 0);
-                return (false, Vec::new());
-            }
-        }
-        (false, data)
-    }
-}
-
 pub struct TestUsbBuilder {
     args: Vec<String>,
     config: HashMap<String, bool>,
@@ -2321,11 +1855,7 @@ pub struct TestUsbBuilder {
 impl TestUsbBuilder {
     pub fn new() -> Self {
         let mut args = Vec::new();
-        let machine: Vec<&str> = MACHINE_TYPE_ARG.split(' ').collect();
-        let mut arg = machine.into_iter().map(|s| s.to_string()).collect();
-        args.append(&mut arg);
-
-        let machine: Vec<&str> = "-D /var/log/mst.log".split(' ').collect();
+        let machine: Vec<&str> = "-machine virt".split(' ').collect();
         let mut arg = machine.into_iter().map(|s| s.to_string()).collect();
         args.append(&mut arg);
         Self {
@@ -2334,25 +1864,15 @@ impl TestUsbBuilder {
         }
     }
 
-    pub fn with_xhci_config(mut self, id: &str, port2: u32, port3: u32) -> Self {
-        let mut args = format!(
+    pub fn with_xhci(mut self, id: &str) -> Self {
+        let args = format!(
             "-device nec-usb-xhci,id={},bus=pcie.0,addr={}",
             id, XHCI_PCI_SLOT_NUM
         );
-        if port2 != 0 {
-            args = format!("{},p2={}", args, port2);
-        }
-        if port3 != 0 {
-            args = format!("{},p3={}", args, port3);
-        }
         let args: Vec<&str> = args[..].split(' ').collect();
         let mut args = args.into_iter().map(|s| s.to_string()).collect();
         self.args.append(&mut args);
         self
-    }
-
-    pub fn with_xhci(self, id: &str) -> Self {
-        self.with_xhci_config(id, 0, 0)
     }
 
     pub fn with_usb_keyboard(mut self, id: &str) -> Self {
@@ -2370,37 +1890,6 @@ impl TestUsbBuilder {
         let mut args = args.into_iter().map(|s| s.to_string()).collect();
         self.args.append(&mut args);
         self.config.insert(String::from("tablet"), true);
-        self
-    }
-
-    pub fn with_usb_storage(mut self, image_path: &str, media: &str) -> Self {
-        let args = format!("-device usb-storage,drive=drive0,id=storage0");
-        let args: Vec<&str> = args[..].split(' ').collect();
-        let mut args = args.into_iter().map(|s| s.to_string()).collect();
-        self.args.append(&mut args);
-
-        let args = format!(
-            "-drive if=none,id=drive0,format=raw,media={},aio=off,direct=false,file={}",
-            media, image_path
-        );
-        let args: Vec<&str> = args[..].split(' ').collect();
-        let mut args = args.into_iter().map(|s| s.to_string()).collect();
-        self.args.append(&mut args);
-
-        self.config.insert(String::from("storage"), true);
-        self
-    }
-
-    pub fn with_usb_camera(mut self, id: &str, path: &str) -> Self {
-        let args = format!("-cameradev demo,id=camdev0,path={}", path);
-        let args: Vec<&str> = args[..].split(' ').collect();
-        let mut args = args.into_iter().map(|s| s.to_string()).collect();
-        self.args.append(&mut args);
-        let args = format!("-device usb-camera,id={},cameradev=camdev0", id);
-        let args: Vec<&str> = args[..].split(' ').collect();
-        let mut args = args.into_iter().map(|s| s.to_string()).collect();
-        self.args.append(&mut args);
-        self.config.insert(String::from("camera"), true);
         self
     }
 
@@ -2462,52 +1951,14 @@ pub fn qmp_send_multi_key_event(test_state: Rc<RefCell<TestState>>, key_list: &[
     }
 }
 
-pub fn qmp_send_pointer_event(test_state: RefMut<TestState>, x: i32, y: i32, btn: i32, down: bool) {
-    let value_str = format!("{},{},{},{}", x, y, btn, if down { 1 } else { 0 });
+pub fn qmp_send_pointer_event(test_state: RefMut<TestState>, x: i32, y: i32, btn: i32) {
+    let value_str = format!("{},{},{}", x, y, btn);
     let mut str =
         "{\"execute\": \"input_event\", \"arguments\": { \"key\": \"pointer\", \"value\":\""
             .to_string();
     str += &value_str;
     str += "\" }}";
     test_state.qmp(&str);
-}
-
-pub fn qmp_plug_keyboard_event(test_state: RefMut<TestState>, num: u32) -> Value {
-    let num_str = format!("{}", num);
-    let mut str =
-        "{\"execute\":\"device_add\",\"arguments\":{\"driver\":\"usb-kbd\",\"id\":\"input"
-            .to_string();
-    str += &num_str;
-    str += "\",\"bus\":\"usb.0\",\"port\":\"1\"}}";
-
-    let value = test_state.qmp(&str);
-    value
-}
-
-pub fn qmp_plug_tablet_event(test_state: RefMut<TestState>, num: u32) -> Value {
-    let num_str = format!("{}", num);
-    let mut str =
-        "{\"execute\":\"device_add\",\"arguments\":{\"driver\":\"usb-tablet\",\"id\":\"input"
-            .to_string();
-    str += &num_str;
-    str += "\",\"bus\":\"usb.0\",\"port\":\"2\"}}";
-
-    let value = test_state.qmp(&str);
-    value
-}
-
-pub fn qmp_unplug_usb_event(test_state: RefMut<TestState>, num: u32) -> Value {
-    let num_str = format!("{}", num);
-    let mut str = "{\"execute\":\"device_del\",\"arguments\":{\"id\":\"input".to_string();
-    str += &num_str;
-    str += "\"}}";
-
-    let value = test_state.qmp(&str);
-    value
-}
-
-pub fn qmp_event_read(test_state: RefMut<TestState>) {
-    test_state.qmp_read();
 }
 
 pub fn clear_iovec(test_state: RefMut<TestState>, iovecs: &Vec<TestIovec>) {

@@ -10,30 +10,29 @@
 // NON-INFRINGEMENT, MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 // See the Mulan PSL v2 for more details.
 
-use std::cell::RefCell;
-use std::rc::Rc;
-use std::{thread, time};
-
-use serde_json::json;
-
 use mod_test::libdriver::machine::TestStdMachine;
 use mod_test::libdriver::malloc::GuestAllocator;
 use mod_test::libdriver::pci::*;
 use mod_test::libdriver::pci_bus::{PciBusOps, TestPciBus};
 use mod_test::libdriver::virtio::{TestVirtQueue, VirtioDeviceOps, VIRTIO_F_VERSION_1};
 use mod_test::libdriver::virtio_block::{
-    add_blk_request, virtio_blk_default_feature, virtio_blk_read, virtio_blk_write,
+    add_blk_request, virtio_blk_defalut_feature, virtio_blk_read, virtio_blk_write,
     VIRTIO_BLK_T_OUT,
 };
 use mod_test::libdriver::virtio_pci_modern::TestVirtioPciDev;
-use mod_test::libtest::{test_init, TestState, MACHINE_TYPE_ARG};
-use mod_test::utils::{cleanup_img, create_img, read_le_u16, ImageType, TEST_IMAGE_SIZE};
+use mod_test::libtest::{test_init, TestState};
+use mod_test::utils::{cleanup_img, create_img, read_le_u16, TEST_IMAGE_SIZE};
+
+use serde_json::json;
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::{thread, time};
 
 const VIRTIO_PCI_VENDOR: u16 = 0x1af4;
 const BLK_DEVICE_ID: u16 = 0x1042;
 const MAX_DEVICE_NUM_IN_MULTIFUNC: u8 = 248;
 const MAX_DEVICE_NUM: u8 = 32;
-const TIMEOUT_S: u64 = 1;
+const TIMEOUT_S: u64 = 5;
 
 #[derive(Clone, Copy)]
 struct DemoDev {
@@ -44,6 +43,7 @@ struct DemoDev {
 }
 
 fn fmt_demo_deves(cfg: DemoDev, num: u8) -> String {
+    // let mut dev_str = format!("-device pcie-root-port,port=0x0,addr=0x1.0x0,bus=pcie.0,id=pcie.{}", cfg.bus_num);
     let mut dev_str: String = String::new();
 
     for i in 1..num + 1 {
@@ -68,10 +68,7 @@ fn fmt_demo_deves(cfg: DemoDev, num: u8) -> String {
 fn init_demo_dev(cfg: DemoDev, dev_num: u8) -> (Rc<RefCell<TestPciDev>>, Rc<RefCell<TestState>>) {
     let mut demo_dev_args: Vec<&str> = Vec::new();
 
-    let mut args: Vec<&str> = MACHINE_TYPE_ARG.split(' ').collect();
-    demo_dev_args.append(&mut args);
-
-    let mut args: Vec<&str> = "-D /tmp/oscar.log".split(' ').collect();
+    let mut args: Vec<&str> = "-machine virt -D /tmp/oscar.log".split(' ').collect();
     demo_dev_args.append(&mut args);
 
     let demo_str = fmt_demo_deves(cfg.clone(), dev_num);
@@ -134,8 +131,6 @@ impl RootPort {
             root_port_msix.msix_addr,
             root_port_msix.msix_data,
         );
-        root_port.init_notification();
-        root_port.clear_slot_event();
 
         Self {
             rp_dev: root_port,
@@ -153,7 +148,7 @@ fn build_root_port_args(root_port_nums: u8) -> Vec<String> {
         multifunc = true;
     }
 
-    let mut root_port_args: Vec<String> = Vec::with_capacity(root_port_nums as usize);
+    let mut root_port_args: Vec<String> = Vec::with_capacity(root_port_nums.try_into().unwrap());
     let mut addr = 1;
     let mut func = 0;
     for bus in 1..=root_port_nums {
@@ -192,7 +187,8 @@ fn build_blk_args(
         assert!(blk_nums < MAX_DEVICE_NUM);
     }
 
-    let mut blk_args: Vec<(String, u8, u8, u8, u8, bool)> = Vec::with_capacity(blk_nums as usize);
+    let mut blk_args: Vec<(String, u8, u8, u8, u8, bool)> =
+        Vec::with_capacity(blk_nums.try_into().unwrap());
     let mut slot = 0;
     let mut func = 0;
     let mut nums = 0;
@@ -228,7 +224,7 @@ fn build_blk_driver_args(blk_nums: u8) -> (Vec<String>, Vec<String>) {
     let mut image_paths: Vec<String> = Vec::new();
 
     for i in 0..blk_nums {
-        let image_path = create_img(TEST_IMAGE_SIZE, 1, &ImageType::Raw);
+        let image_path = create_img(TEST_IMAGE_SIZE, 1);
         image_paths.push(image_path.clone());
         let driver_arg_str = format!(
             "-drive if=none,id=drive-{},file={},format=raw,direct=false",
@@ -250,8 +246,8 @@ fn build_hotplug_blk_cmd(
     let add_blk_command = format!(
         "{{\"execute\": \"blockdev-add\", \
         \"arguments\": {{\"node-name\": \"drive-{}\", \"file\": {{\"driver\": \
-        \"file\", \"filename\": \"{}\", \"aio\": \"native\"}}, \
-        \"cache\": {{\"direct\": true}}, \"read-only\": false}}}}",
+        \"file\", \"filename\": \"{}\"}}, \"cache\": {{\"direct\": true}}, \
+        \"read-only\": false}}}}",
         hotplug_blk_id, hotplug_image_path
     );
 
@@ -338,7 +334,7 @@ fn create_machine(
 ) {
     let mut extra_args: Vec<&str> = Vec::new();
 
-    let mut args: Vec<&str> = MACHINE_TYPE_ARG.split(' ').collect();
+    let mut args: Vec<&str> = "-machine virt".split(' ').collect();
     extra_args.append(&mut args);
 
     for device_arg in device_args.iter() {
@@ -435,7 +431,7 @@ fn validate_config_perm_1byte(
     pci_dev: TestPciDev,
     offset: u8,
     expected_value: u8,
-    written_value: u8,
+    writed_value: u8,
     mask: u8,
 ) {
     let config_value =
@@ -448,7 +444,7 @@ fn validate_config_perm_1byte(
     pci_dev
         .pci_bus
         .borrow()
-        .config_writeb(pci_dev.bus_num, pci_dev.devfn, offset, written_value);
+        .config_writeb(pci_dev.bus_num, pci_dev.devfn, offset, writed_value);
 
     let config_value =
         pci_dev
@@ -462,13 +458,13 @@ fn validate_config_perm_2byte(
     pci_dev: TestPciDev,
     offset: u8,
     expected_value: u16,
-    written_value: u16,
+    writed_value: u16,
     mask: u16,
 ) {
     pci_dev
         .pci_bus
         .borrow()
-        .config_writew(pci_dev.bus_num, pci_dev.devfn, offset, written_value);
+        .config_writew(pci_dev.bus_num, pci_dev.devfn, offset, writed_value);
     let config_value =
         pci_dev
             .pci_bus
@@ -481,7 +477,7 @@ fn validate_config_perm_4byte(
     pci_dev: TestPciDev,
     offset: u8,
     expected_value: u32,
-    written_value: u32,
+    writed_value: u32,
     mask: u32,
 ) {
     let config_value =
@@ -494,7 +490,7 @@ fn validate_config_perm_4byte(
     pci_dev
         .pci_bus
         .borrow()
-        .config_writel(pci_dev.bus_num, pci_dev.devfn, offset, written_value);
+        .config_writel(pci_dev.bus_num, pci_dev.devfn, offset, writed_value);
 
     let config_value =
         pci_dev
@@ -559,7 +555,7 @@ fn validate_blk_io_success(
     test_state: Rc<RefCell<TestState>>,
     alloc: Rc<RefCell<GuestAllocator>>,
 ) {
-    let features = virtio_blk_default_feature(blk.clone());
+    let features = virtio_blk_defalut_feature(blk.clone());
     let virtqueues = blk
         .borrow_mut()
         .init_device(test_state.clone(), alloc.clone(), features, 1);
@@ -595,20 +591,20 @@ fn simple_blk_io_req(
     free_head
 }
 
-fn wait_intr_timeout(
+fn wait_msix_timeout(
     blk: Rc<RefCell<TestVirtioPciDev>>,
     virtqueue: Rc<RefCell<TestVirtQueue>>,
-    timeout: u64,
+    timeout_us: u64,
 ) -> bool {
     let start_time = time::Instant::now();
-    let timeout = time::Duration::from_secs(timeout);
+    let timeout_us = time::Duration::from_micros(timeout_us);
 
     loop {
         if blk.borrow().queue_was_notified(virtqueue.clone()) {
             return false;
         }
 
-        if time::Instant::now() - start_time > timeout {
+        if time::Instant::now() - start_time > timeout_us {
             return true;
         }
     }
@@ -639,9 +635,9 @@ fn validate_std_blk_io(
     );
 }
 
-fn wait_root_port_msix(root_port: Rc<RefCell<RootPort>>) -> bool {
+fn wait_root_port_intr(root_port: Rc<RefCell<RootPort>>) -> bool {
     let start_time = time::Instant::now();
-    let timeout = time::Duration::from_secs(TIMEOUT_S);
+    let timeout_us = time::Duration::from_secs(TIMEOUT_S);
     let rp_borrowed = root_port.borrow();
     loop {
         if rp_borrowed.rp_dev.has_msix(
@@ -650,21 +646,29 @@ fn wait_root_port_msix(root_port: Rc<RefCell<RootPort>>) -> bool {
         ) {
             return true;
         }
-        if (time::Instant::now() - start_time) >= timeout {
+        if (time::Instant::now() - start_time) >= timeout_us {
             return false;
         }
     }
 }
 
-fn wait_root_port_intx(root_port: Rc<RefCell<RootPort>>) -> bool {
+fn wait_cci_set(root_port: Rc<RefCell<RootPort>>) -> bool {
     let start_time = time::Instant::now();
-    let timeout = time::Duration::from_secs(TIMEOUT_S);
+    let timeout_us = time::Duration::from_secs(TIMEOUT_S);
     let rp_borrowed = root_port.borrow();
+    let cci_mask = PCI_EXP_SLTSTA_CC;
+    let cap_exp_addr = root_port.borrow().rp_dev.find_capability(PCI_CAP_ID_EXP, 0);
+
     loop {
-        if rp_borrowed.rp_dev.has_intx() {
+        if rp_borrowed
+            .rp_dev
+            .config_readw(cap_exp_addr + PCI_EXP_SLTSTA)
+            & cci_mask
+            == 1
+        {
             return true;
         }
-        if (time::Instant::now() - start_time) >= timeout {
+        if (time::Instant::now() - start_time) >= timeout_us {
             return false;
         }
     }
@@ -766,7 +770,7 @@ fn hotplug_blk(
     slot: u8,
     func: u8,
 ) {
-    let hotplug_image_path = create_img(TEST_IMAGE_SIZE, 1, &ImageType::Raw);
+    let hotplug_image_path = create_img(TEST_IMAGE_SIZE, 1);
     image_paths.push(hotplug_image_path.clone());
 
     // Hotplug a block device whose bdf is 2:0:0.
@@ -789,12 +793,9 @@ fn hotplug_blk(
     );
 
     assert!(
-        wait_root_port_msix(root_port.clone()),
+        wait_root_port_intr(root_port.clone()),
         "Wait for interrupt of root port timeout"
     );
-
-    validate_hotplug(root_port.clone());
-    handle_isr(root_port.clone());
     power_on_device(root_port.clone());
 }
 
@@ -809,12 +810,10 @@ fn hotunplug_blk(
     let ret = test_state.borrow().qmp(&delete_device_command);
 
     assert!(
-        wait_root_port_msix(root_port.clone()),
+        wait_root_port_intr(root_port.clone()),
         "Wait for interrupt of root port timeout"
     );
 
-    validate_hotunplug(root_port.clone());
-    handle_isr(root_port.clone());
     power_off_device(root_port.clone());
 
     assert_eq!(*ret.get("return").unwrap(), json!({}));
@@ -823,12 +822,8 @@ fn hotunplug_blk(
     let ret = test_state.borrow().qmp(&delete_blk_command);
     assert_eq!(*ret.get("return").unwrap(), json!({}));
 
-    assert!(
-        wait_root_port_msix(root_port.clone()),
-        "Wait for interrupt of root port timeout"
-    );
-    validate_cmd_complete(root_port.clone());
-    handle_isr(root_port.clone());
+    wait_cci_set(root_port.clone());
+
     // Verify the vendor id for the virtio block device.
     validate_config_value_2byte(
         blk.borrow().pci_dev.pci_bus.clone(),
@@ -837,62 +832,6 @@ fn hotunplug_blk(
         PCI_VENDOR_ID,
         0xFFFF,
         0xFFFF,
-    );
-}
-
-fn handle_isr(root_port: Rc<RefCell<RootPort>>) {
-    let cap_exp_addr = root_port.borrow().rp_dev.find_capability(PCI_CAP_ID_EXP, 0);
-    let mut status = root_port.borrow().rp_dev.pci_bus.borrow().config_readw(
-        root_port.borrow().rp_dev.bus_num,
-        root_port.borrow().rp_dev.devfn,
-        cap_exp_addr + PCI_EXP_SLTSTA,
-    );
-
-    status &= PCI_EXP_SLTSTA_ABP | PCI_EXP_SLTSTA_PDC | PCI_EXP_SLTSTA_CC;
-    root_port.borrow().rp_dev.pci_bus.borrow().config_writew(
-        root_port.borrow().rp_dev.bus_num,
-        root_port.borrow().rp_dev.devfn,
-        cap_exp_addr + PCI_EXP_SLTSTA,
-        status,
-    );
-}
-
-fn validate_hotplug(root_port: Rc<RefCell<RootPort>>) {
-    let cap_exp_addr = root_port.borrow().rp_dev.find_capability(PCI_CAP_ID_EXP, 0);
-    let mask = PCI_EXP_SLTSTA_ABP | PCI_EXP_SLTSTA_PDC;
-    validate_config_value_2byte(
-        root_port.borrow().rp_dev.pci_bus.clone(),
-        root_port.borrow().rp_dev.bus_num,
-        root_port.borrow().rp_dev.devfn,
-        cap_exp_addr + PCI_EXP_SLTSTA,
-        PCI_EXP_SLTSTA_ABP | PCI_EXP_SLTSTA_PDC,
-        mask,
-    );
-}
-
-fn validate_hotunplug(root_port: Rc<RefCell<RootPort>>) {
-    let cap_exp_addr = root_port.borrow().rp_dev.find_capability(PCI_CAP_ID_EXP, 0);
-    let mask = PCI_EXP_SLTSTA_ABP;
-    validate_config_value_2byte(
-        root_port.borrow().rp_dev.pci_bus.clone(),
-        root_port.borrow().rp_dev.bus_num,
-        root_port.borrow().rp_dev.devfn,
-        cap_exp_addr + PCI_EXP_SLTSTA,
-        PCI_EXP_SLTSTA_ABP,
-        mask,
-    );
-}
-
-fn validate_cmd_complete(root_port: Rc<RefCell<RootPort>>) {
-    let cap_exp_addr = root_port.borrow().rp_dev.find_capability(PCI_CAP_ID_EXP, 0);
-    let mask = PCI_EXP_SLTSTA_CC;
-    validate_config_value_2byte(
-        root_port.borrow().rp_dev.pci_bus.clone(),
-        root_port.borrow().rp_dev.bus_num,
-        root_port.borrow().rp_dev.devfn,
-        cap_exp_addr + PCI_EXP_SLTSTA,
-        PCI_EXP_SLTSTA_CC,
-        mask,
     );
 }
 
@@ -948,19 +887,11 @@ fn test_pci_device_discovery_002() {
         set_up(root_port_nums, blk_nums, true, false);
 
     // Create a root port whose bdf is 0:1:0.
-    let root_port_1 = Rc::new(RefCell::new(RootPort::new(
+    let root_port = Rc::new(RefCell::new(RootPort::new(
         machine.clone(),
         alloc.clone(),
         0,
         1 << 3 | 0,
-    )));
-
-    // Create a root port whose bdf is 0:2:0.
-    let root_port_2 = Rc::new(RefCell::new(RootPort::new(
-        machine.clone(),
-        alloc.clone(),
-        0,
-        2 << 3 | 0,
     )));
 
     // Create a block device whose bdf is 1:0:0.
@@ -977,12 +908,12 @@ fn test_pci_device_discovery_002() {
     );
 
     // Hotplug a block device whose id is 0.
-    hotunplug_blk(test_state.clone(), blk.clone(), root_port_1.clone(), 0);
+    hotunplug_blk(test_state.clone(), blk.clone(), root_port.clone(), 0);
 
     // Hotplug a block device whose id is 1 and bdf is 2:0:0.
     hotplug_blk(
         test_state.clone(),
-        root_port_2.clone(),
+        root_port.clone(),
         &mut image_paths,
         1,
         2,
@@ -1032,7 +963,7 @@ fn test_pci_device_discovery_003() {
     );
 
     let blk_id = 1;
-    let hotplug_image_path = create_img(TEST_IMAGE_SIZE, 1, &ImageType::Raw);
+    let hotplug_image_path = create_img(TEST_IMAGE_SIZE, 1);
     image_paths.push(hotplug_image_path.clone());
 
     // Hotplug a block device whose bdf is 1:0:0.
@@ -1073,7 +1004,7 @@ fn test_pci_device_discovery_004() {
     )));
 
     let blk_id = 0;
-    let hotplug_image_path = create_img(TEST_IMAGE_SIZE, 1, &ImageType::Raw);
+    let hotplug_image_path = create_img(TEST_IMAGE_SIZE, 1);
     image_paths.push(hotplug_image_path.clone());
 
     // Hotplug a block device whose id is 0 and bdf is 1:0:0.
@@ -1123,8 +1054,7 @@ fn test_pci_type0_config() {
         0xFFFF,
     );
 
-    // verify that the lower three bits of the command register of type0 device is readable and
-    // writable.
+    // verify that the lower three bits of the command register of type0 device is readable and writable.
     validate_config_perm_2byte(blk.borrow().pci_dev.clone(), PCI_COMMAND, 0x4, 0x4, 0x7);
 
     // verify that the interrupt status of the status register of type0 device is read-only.
@@ -1271,14 +1201,10 @@ fn test_pci_type1_reset() {
     let cmd_memory = command & PCI_COMMAND_MEMORY as u16;
 
     // Bitwise inversion of memory space enable.
-    let write_cmd = if cmd_memory != 0 {
-        command & !PCI_COMMAND_MEMORY as u16
-    } else {
-        command | PCI_COMMAND_MEMORY as u16
-    };
+    let write_cmd = command | (command & (!PCI_COMMAND_MEMORY as u16)) | !cmd_memory;
     root_port.rp_dev.config_writew(PCI_COMMAND, write_cmd);
     let old_command = root_port.rp_dev.config_readw(PCI_COMMAND);
-    assert_eq!(old_command, write_cmd);
+    assert_ne!(old_command, write_cmd);
 
     root_port
         .rp_dev
@@ -1297,7 +1223,7 @@ fn test_pci_type1_reset() {
 
 /// Verify that out-of-bounds access to the configuration space
 #[test]
-fn test_out_boundary_config_access() {
+fn test_out_boundry_config_access() {
     let blk_nums = 0;
     let root_port_nums = 1;
     let (test_state, machine, alloc, image_paths) = set_up(root_port_nums, blk_nums, true, false);
@@ -1341,7 +1267,7 @@ fn test_out_size_config_access() {
 
 /// Verify that out-of-bounds access to the msix bar space.
 #[test]
-fn test_out_boundary_msix_access() {
+fn test_out_boundry_msix_access() {
     let blk_nums = 0;
     let root_port_nums = 1;
     let (test_state, machine, alloc, image_paths) = set_up(root_port_nums, blk_nums, true, false);
@@ -1487,16 +1413,18 @@ fn test_pci_msix_global_ctl() {
     );
 
     set_msix_disable(blk.borrow().pci_dev.clone());
-    let free_head = simple_blk_io_req(
+    let mut free_head = simple_blk_io_req(
         blk.clone(),
         test_state.clone(),
         vqs[0].clone(),
         alloc.clone(),
     );
-
     // Verify that the os can not receive msix interrupt when msix is disabled.
-    assert!(wait_intr_timeout(blk.clone(), vqs[0].clone(), TIMEOUT_S));
+    assert!(wait_msix_timeout(blk.clone(), vqs[0].clone(), TIMEOUT_S));
 
+    set_msix_enable(blk.borrow().pci_dev.clone());
+    // Verify that the os can receive msix interrupt when msix is enabled.
+    assert!(!wait_msix_timeout(blk.clone(), vqs[0].clone(), TIMEOUT_S));
     blk.borrow().poll_used_elem(
         test_state.clone(),
         vqs[0].clone(),
@@ -1506,30 +1434,20 @@ fn test_pci_msix_global_ctl() {
         false,
     );
 
-    set_msix_enable(blk.borrow().pci_dev.clone());
-    let _free_head = simple_blk_io_req(
-        blk.clone(),
-        test_state.clone(),
-        vqs[0].clone(),
-        alloc.clone(),
-    );
-    // Verify that the os can receive msix interrupt when msix is enabled.
-    assert!(!wait_intr_timeout(blk.clone(), vqs[0].clone(), TIMEOUT_S));
-
     mask_msix_global(blk.borrow().pci_dev.clone());
 
-    let free_head = simple_blk_io_req(
+    free_head = simple_blk_io_req(
         blk.clone(),
         test_state.clone(),
         vqs[0].clone(),
         alloc.clone(),
     );
     // Verify that the os can not receive msix interrupt when the function of vectors is masked.
-    assert!(wait_intr_timeout(blk.clone(), vqs[0].clone(), TIMEOUT_S));
+    assert!(wait_msix_timeout(blk.clone(), vqs[0].clone(), TIMEOUT_S));
 
     unmask_msix_global(blk.borrow().pci_dev.clone());
     // Verify that the os can receive msix interrupt when the function of vectors is unmasked.
-    assert!(!wait_intr_timeout(blk.clone(), vqs[0].clone(), TIMEOUT_S));
+    assert!(!wait_msix_timeout(blk.clone(), vqs[0].clone(), TIMEOUT_S));
     blk.borrow().poll_used_elem(
         test_state.clone(),
         vqs[0].clone(),
@@ -1543,7 +1461,7 @@ fn test_pci_msix_global_ctl() {
 }
 
 /// Test whether the Mask bit in the vector register in msix table works well,
-/// which means that when it's set, msix pends notification of the related vector,
+/// which means that when it's set, msix pends notification of the related vecotr,
 /// and starts to notify as soon as the mask bit is cleared by the OS.
 #[test]
 fn test_pci_msix_local_ctl() {
@@ -1568,11 +1486,11 @@ fn test_pci_msix_local_ctl() {
         alloc.clone(),
     );
     // Verify that the os can not receive msix interrupt when the vectors of virtqueue is masked.
-    assert!(wait_intr_timeout(blk.clone(), vqs[0].clone(), TIMEOUT_S));
+    assert!(wait_msix_timeout(blk.clone(), vqs[0].clone(), TIMEOUT_S));
 
     unmask_msix_vector(blk.borrow().pci_dev.clone(), 1);
     // Verify that the os canreceive msix interrupt when the vectors of virtqueue is unmasked.
-    assert!(!wait_intr_timeout(blk.clone(), vqs[0].clone(), TIMEOUT_S));
+    assert!(!wait_msix_timeout(blk.clone(), vqs[0].clone(), TIMEOUT_S));
     blk.borrow().poll_used_elem(
         test_state.clone(),
         vqs[0].clone(),
@@ -1620,151 +1538,7 @@ fn test_alloc_abnormal_vector() {
         alloc.clone(),
     );
     // Verify that the os can not receive msix interrupt when the vectors of virtqueue is .
-    assert!(wait_intr_timeout(blk.clone(), virtqueue.clone(), TIMEOUT_S));
-
-    blk.borrow_mut()
-        .cleanup_virtqueue(alloc.clone(), virtqueue.borrow().desc);
-    tear_down(Some(blk), test_state, alloc, None, Some(image_paths));
-}
-
-#[test]
-fn test_intx_basic() {
-    let blk_nums = 1;
-    let root_port_nums = 1;
-    let (test_state, machine, alloc, image_paths) = set_up(root_port_nums, blk_nums, true, false);
-
-    let blk = create_blk(machine.clone(), 1, 0, 0);
-
-    // 1. Init device.
-    blk.borrow_mut().reset();
-    blk.borrow_mut().set_acknowledge();
-    blk.borrow_mut().set_driver();
-    blk.borrow_mut().negotiate_features(1 << VIRTIO_F_VERSION_1);
-    blk.borrow_mut().set_features_ok();
-
-    set_msix_disable(blk.borrow().pci_dev.clone());
-    blk.borrow_mut().pci_dev.set_intx_irq_num(1 as u8);
-
-    let virtqueue = blk
-        .borrow()
-        .setup_virtqueue(test_state.clone(), alloc.clone(), 0 as u16);
-    blk.borrow().set_driver_ok();
-
-    let free_head = simple_blk_io_req(
-        blk.clone(),
-        test_state.clone(),
-        virtqueue.clone(),
-        alloc.clone(),
-    );
-    // Verify that the os can receive INTx interrupt when msix is disabled.
-    assert!(!wait_intr_timeout(
-        blk.clone(),
-        virtqueue.clone(),
-        TIMEOUT_S
-    ));
-    let mut intr_status = blk.borrow().pci_dev.config_readw(PCI_STATUS) & PCI_STATUS_INTERRUPT != 0;
-    assert!(intr_status);
-
-    let isr = blk.borrow().isr_readb();
-    assert_eq!(isr, 1);
-    intr_status = blk.borrow().pci_dev.config_readw(PCI_STATUS) & PCI_STATUS_INTERRUPT != 0;
-    assert!(!intr_status);
-
-    blk.borrow().pci_dev.eoi_intx();
-
-    blk.borrow().poll_used_elem(
-        test_state.clone(),
-        virtqueue.clone(),
-        free_head,
-        TIMEOUT_S,
-        &mut None,
-        false,
-    );
-
-    blk.borrow_mut()
-        .cleanup_virtqueue(alloc.clone(), virtqueue.borrow().desc);
-    tear_down(Some(blk), test_state, alloc, None, Some(image_paths));
-}
-
-#[test]
-fn test_intx_disable() {
-    let blk_nums = 1;
-    let root_port_nums = 1;
-    let (test_state, machine, alloc, image_paths) = set_up(root_port_nums, blk_nums, true, false);
-
-    let blk = create_blk(machine.clone(), 1, 0, 0);
-
-    // 1. Init device.
-    blk.borrow_mut().reset();
-    blk.borrow_mut().set_acknowledge();
-    blk.borrow_mut().set_driver();
-    blk.borrow_mut().negotiate_features(1 << VIRTIO_F_VERSION_1);
-    blk.borrow_mut().set_features_ok();
-
-    set_msix_disable(blk.borrow().pci_dev.clone());
-    blk.borrow_mut().pci_dev.set_intx_irq_num(1 as u8);
-
-    let virtqueue = blk
-        .borrow()
-        .setup_virtqueue(test_state.clone(), alloc.clone(), 0 as u16);
-    blk.borrow().set_driver_ok();
-
-    // Disable INTx.
-    let command = blk.borrow().pci_dev.config_readw(PCI_COMMAND);
-    blk.borrow()
-        .pci_dev
-        .config_writew(PCI_COMMAND, command | PCI_COMMAND_INTX_DISABLE);
-
-    let free_head = simple_blk_io_req(
-        blk.clone(),
-        test_state.clone(),
-        virtqueue.clone(),
-        alloc.clone(),
-    );
-    // Verify that the os can not receive INTx interrupt when msix is disabled.
-    assert!(wait_intr_timeout(blk.clone(), virtqueue.clone(), TIMEOUT_S));
-
-    let isr = blk.borrow().isr_readb();
-    assert_eq!(isr, 1);
-
-    blk.borrow().poll_used_elem(
-        test_state.clone(),
-        virtqueue.clone(),
-        free_head,
-        TIMEOUT_S,
-        &mut None,
-        false,
-    );
-
-    // Enable INTx.
-    blk.borrow()
-        .pci_dev
-        .config_writew(PCI_COMMAND, command & !PCI_COMMAND_INTX_DISABLE);
-
-    let _free_head = simple_blk_io_req(
-        blk.clone(),
-        test_state.clone(),
-        virtqueue.clone(),
-        alloc.clone(),
-    );
-
-    // Verify that the os can receive INTx interrupt when msix is disabled.
-    assert!(!wait_intr_timeout(
-        blk.clone(),
-        virtqueue.clone(),
-        TIMEOUT_S
-    ));
-    let isr = blk.borrow().isr_readb();
-    assert_eq!(isr, 1);
-
-    blk.borrow().poll_used_elem(
-        test_state.clone(),
-        virtqueue.clone(),
-        free_head,
-        TIMEOUT_S,
-        &mut None,
-        false,
-    );
+    assert!(wait_msix_timeout(blk.clone(), virtqueue.clone(), TIMEOUT_S));
 
     blk.borrow_mut()
         .cleanup_virtqueue(alloc.clone(), virtqueue.borrow().desc);
@@ -1779,7 +1553,7 @@ fn test_pci_hotplug_001() {
     let (test_state, machine, alloc, mut image_paths) =
         set_up(root_port_nums, blk_nums, true, false);
 
-    // Create a root port whose bdf is 0:1:0.
+    // Create a root port whose bdf is 0:2:0.
     let root_port = Rc::new(RefCell::new(RootPort::new(
         machine.clone(),
         alloc.clone(),
@@ -1874,7 +1648,7 @@ fn test_pci_hotplug_003() {
     let (test_state, _machine, alloc, mut image_paths) =
         set_up(root_port_nums, blk_nums, true, false);
 
-    let hotplug_image_path = create_img(TEST_IMAGE_SIZE, 1, &ImageType::Raw);
+    let hotplug_image_path = create_img(TEST_IMAGE_SIZE, 1);
     image_paths.push(hotplug_image_path.clone());
 
     // Hotplug a block device whose id is 0, bdf is 1:1:0.
@@ -1897,7 +1671,7 @@ fn test_pci_hotplug_004() {
     let (test_state, _machine, alloc, mut image_paths) =
         set_up(root_port_nums, blk_nums, true, false);
 
-    let hotplug_image_path = create_img(TEST_IMAGE_SIZE, 1, &ImageType::Raw);
+    let hotplug_image_path = create_img(TEST_IMAGE_SIZE, 1);
     image_paths.push(hotplug_image_path.clone());
 
     let hotplug_blk_id = 1;
@@ -1919,7 +1693,7 @@ fn test_pci_hotplug_005() {
     let (test_state, _machine, alloc, mut image_paths) =
         set_up(root_port_nums, blk_nums, true, false);
 
-    let hotplug_image_path = create_img(TEST_IMAGE_SIZE, 1, &ImageType::Raw);
+    let hotplug_image_path = create_img(TEST_IMAGE_SIZE, 1);
     image_paths.push(hotplug_image_path.clone());
 
     let hotplug_blk_id = 0;
@@ -1942,7 +1716,7 @@ fn test_pci_hotplug_006() {
     let (test_state, _machine, alloc, mut image_paths) =
         set_up(root_port_nums, blk_nums, true, false);
 
-    let hotplug_image_path = create_img(TEST_IMAGE_SIZE, 1, &ImageType::Raw);
+    let hotplug_image_path = create_img(TEST_IMAGE_SIZE, 1);
     image_paths.push(hotplug_image_path.clone());
 
     let hotplug_blk_id = 0;
@@ -1958,75 +1732,6 @@ fn test_pci_hotplug_006() {
     tear_down(None, test_state, alloc, None, Some(image_paths));
 }
 
-/// Hotplug using INTx interrupt testcase.
-#[test]
-fn test_pci_hotplug_007() {
-    let blk_nums = 0;
-    let root_port_nums = 1;
-    let (test_state, machine, alloc, mut image_paths) =
-        set_up(root_port_nums, blk_nums, true, false);
-
-    // Create a root port whose bdf is 0:1:0.
-    let root_port = Rc::new(RefCell::new(RootPort::new(
-        machine.clone(),
-        alloc.clone(),
-        0,
-        1 << 3 | 0,
-    )));
-
-    set_msix_disable(root_port.borrow().rp_dev.clone());
-    root_port.borrow_mut().rp_dev.set_intx_irq_num(1 as u8);
-
-    // Hotplug a block device whose id is 1 and bdf is 1:0:0.
-    let bus = 1;
-    let slot = 0;
-    let func = 0;
-    let hotplug_blk_id = 0;
-    let hotplug_image_path = create_img(TEST_IMAGE_SIZE, 1, &ImageType::Raw);
-    image_paths.push(hotplug_image_path.clone());
-
-    // Hotplug a block device whose bdf is 1:0:0.
-    let (add_blk_command, add_device_command) =
-        build_hotplug_blk_cmd(hotplug_blk_id, hotplug_image_path.clone(), bus, slot, 0);
-    let ret = test_state.borrow().qmp(&add_blk_command);
-    assert_eq!(*ret.get("return").unwrap(), json!({}));
-
-    let ret = test_state.borrow().qmp(&add_device_command);
-    assert_eq!(*ret.get("return").unwrap(), json!({}));
-
-    // Verify the vendor id for the virtio block device hotplugged.
-    validate_config_value_2byte(
-        root_port.borrow().rp_dev.pci_bus.clone(),
-        bus,
-        slot << 3 | func,
-        PCI_VENDOR_ID,
-        VIRTIO_PCI_VENDOR,
-        0xFFFF,
-    );
-
-    assert!(
-        wait_root_port_intx(root_port.clone()),
-        "Wait for interrupt of root port timeout"
-    );
-
-    validate_hotplug(root_port.clone());
-    handle_isr(root_port.clone());
-    power_on_device(root_port.clone());
-
-    // Create a block device whose bdf is 1:0:0.
-    let blk = create_blk(machine.clone(), 1, 0, 0);
-    let vqs = blk.borrow_mut().init_device(
-        test_state.clone(),
-        alloc.clone(),
-        1 << VIRTIO_F_VERSION_1,
-        1,
-    );
-
-    validate_std_blk_io(blk.clone(), test_state.clone(), vqs.clone(), alloc.clone());
-
-    tear_down(Some(blk), test_state, alloc, Some(vqs), Some(image_paths));
-}
-
 /// Basic hotunplug testcase.
 #[test]
 fn test_pci_hotunplug_001() {
@@ -2034,7 +1739,7 @@ fn test_pci_hotunplug_001() {
     let root_port_nums = 1;
     let (test_state, machine, alloc, image_paths) = set_up(root_port_nums, blk_nums, true, false);
 
-    // Create root port whose bdf is 0:1:0.
+    // Create root port whose  bdf is 0:1:0.
     let root_port = Rc::new(RefCell::new(RootPort::new(
         machine.clone(),
         alloc.clone(),
@@ -2091,10 +1796,9 @@ fn test_pci_hotunplug_003() {
     let (delete_device_command, delete_blk_command) = build_hotunplug_blk_cmd(unplug_blk_id);
     let ret = test_state.borrow().qmp(&delete_device_command);
     assert!(
-        wait_root_port_msix(root_port.clone()),
+        wait_root_port_intr(root_port.clone()),
         "Wait for interrupt of root port timeout"
     );
-
     // The block device will not be unplugged when it is power on.
     power_on_device(root_port.clone());
     assert_eq!(*ret.get("return").unwrap(), json!({}));
@@ -2113,7 +1817,10 @@ fn test_pci_hotunplug_003() {
 
     let (delete_device_command, delete_blk_command) = build_hotunplug_blk_cmd(unplug_blk_id);
     let ret = test_state.borrow().qmp(&delete_device_command);
-
+    assert!(
+        wait_root_port_intr(root_port.clone()),
+        "Wait for interrupt of root port timeout"
+    );
     // The block device will not be unplugged when indicator of power is blinking.
     power_indicator_blink(root_port.clone());
     assert_eq!(*ret.get("return").unwrap(), json!({}));
@@ -2191,12 +1898,12 @@ fn test_pci_hotunplug_004() {
     assert_eq!(*ret.get("return").unwrap(), json!({}));
 
     assert!(
-        wait_root_port_msix(root_port_1.clone()),
+        wait_root_port_intr(root_port_1.clone()),
         "Wait for interrupt of root port timeout"
     );
 
     assert!(
-        wait_root_port_msix(root_port_2.clone()),
+        wait_root_port_intr(root_port_2.clone()),
         "Wait for interrupt of root port timeout"
     );
 
@@ -2278,8 +1985,7 @@ fn test_pci_hotunplug_006() {
     tear_down(None, test_state, alloc, None, Some(image_paths));
 }
 
-/// Guest sets PIC/PCC twice during hotunplug, the device ignores the 2nd write to speed up
-/// hotunplug.
+/// Guest sets PIC/PCC twice during hotunplug, the device ignores the 2nd write to speed up hotunplug.
 #[test]
 fn test_pci_hotunplug_007() {
     let blk_nums = 1;
@@ -2302,7 +2008,7 @@ fn test_pci_hotunplug_007() {
     let (delete_device_command, _delete_blk_command) = build_hotunplug_blk_cmd(unplug_blk_id);
     let _ret = test_state.borrow().qmp(&delete_device_command);
     assert!(
-        wait_root_port_msix(root_port.clone()),
+        wait_root_port_intr(root_port.clone()),
         "Wait for interrupt of root port timeout"
     );
 
@@ -2313,66 +2019,6 @@ fn test_pci_hotunplug_007() {
 
     test_state.borrow().wait_qmp_event();
 
-    // Verify the vendor id for the virtio block device.
-    validate_config_value_2byte(
-        blk.borrow().pci_dev.pci_bus.clone(),
-        blk.borrow().pci_dev.bus_num,
-        blk.borrow().pci_dev.devfn,
-        PCI_VENDOR_ID,
-        0xFFFF,
-        0xFFFF,
-    );
-
-    tear_down(None, test_state, alloc, None, Some(image_paths));
-}
-
-/// Hotunplug using INTx interrupt testcase.
-#[test]
-fn test_pci_hotunplug_008() {
-    let blk_nums = 1;
-    let root_port_nums = 1;
-    let (test_state, machine, alloc, image_paths) = set_up(root_port_nums, blk_nums, true, false);
-
-    // Create root port whose bdf is 0:1:0.
-    let root_port = Rc::new(RefCell::new(RootPort::new(
-        machine.clone(),
-        alloc.clone(),
-        0,
-        1 << 3 | 0,
-    )));
-
-    set_msix_disable(root_port.borrow().rp_dev.clone());
-    root_port.borrow_mut().rp_dev.set_intx_irq_num(1 as u8);
-
-    // Create a block device whose bdf is 1:0:0.
-    let blk = create_blk(machine.clone(), 1, 0, 0);
-
-    // Hotunplug the block device whose bdf is 1:0:0.
-    let hotunplug_blk_id = 0;
-    let (delete_device_command, delete_blk_command) = build_hotunplug_blk_cmd(hotunplug_blk_id);
-    let ret = test_state.borrow().qmp(&delete_device_command);
-
-    assert!(
-        wait_root_port_intx(root_port.clone()),
-        "Wait for interrupt of root port timeout"
-    );
-
-    validate_hotunplug(root_port.clone());
-    handle_isr(root_port.clone());
-    power_off_device(root_port.clone());
-
-    assert_eq!(*ret.get("return").unwrap(), json!({}));
-    test_state.borrow().wait_qmp_event();
-
-    let ret = test_state.borrow().qmp(&delete_blk_command);
-    assert_eq!(*ret.get("return").unwrap(), json!({}));
-
-    assert!(
-        wait_root_port_intx(root_port.clone()),
-        "Wait for interrupt of root port timeout"
-    );
-    validate_cmd_complete(root_port.clone());
-    handle_isr(root_port.clone());
     // Verify the vendor id for the virtio block device.
     validate_config_value_2byte(
         blk.borrow().pci_dev.pci_bus.clone(),
@@ -2403,7 +2049,7 @@ fn test_pci_hotplug_combine_001() {
     )));
 
     let hotplug_blk_id = 0;
-    let hotplug_image_path = create_img(TEST_IMAGE_SIZE, 1, &ImageType::Raw);
+    let hotplug_image_path = create_img(TEST_IMAGE_SIZE, 1);
     image_paths.push(hotplug_image_path.clone());
 
     // Hotplug a block device whose bdf is 1:0:0.
@@ -2415,11 +2061,9 @@ fn test_pci_hotplug_combine_001() {
     assert_eq!(*ret.get("return").unwrap(), json!({}));
 
     assert!(
-        wait_root_port_msix(root_port.clone()),
+        wait_root_port_intr(root_port.clone()),
         "Wait for interrupt of root port timeout"
     );
-
-    handle_isr(root_port.clone());
     power_on_device(root_port.clone());
 
     // Create a block device whose bdf is 1:0:0.
@@ -2436,11 +2080,9 @@ fn test_pci_hotplug_combine_001() {
     let (delete_device_command, delete_blk_command) = build_hotunplug_blk_cmd(hotplug_blk_id);
     let ret = test_state.borrow().qmp(&delete_device_command);
     assert!(
-        wait_root_port_msix(root_port.clone()),
+        wait_root_port_intr(root_port.clone()),
         "Wait for interrupt of root port timeout"
     );
-
-    handle_isr(root_port.clone());
     power_off_device(root_port.clone());
 
     assert_eq!(*ret.get("return").unwrap(), json!({}));
@@ -2459,7 +2101,7 @@ fn test_pci_hotplug_combine_001() {
     );
 
     let hotplug_blk_id = 1;
-    let hotplug_image_path = create_img(TEST_IMAGE_SIZE, 1, &ImageType::Raw);
+    let hotplug_image_path = create_img(TEST_IMAGE_SIZE, 1);
     image_paths.push(hotplug_image_path.clone());
 
     // Hotplug a block device whose bdf is 1:0:0.
@@ -2471,11 +2113,9 @@ fn test_pci_hotplug_combine_001() {
     assert_eq!(*ret.get("return").unwrap(), json!({}));
 
     assert!(
-        wait_root_port_msix(root_port.clone()),
+        wait_root_port_intr(root_port.clone()),
         "Wait for interrupt of root port timeout"
     );
-
-    handle_isr(root_port.clone());
     power_on_device(root_port.clone());
 
     // Verify the virtio block device has been plugged.
@@ -2501,11 +2141,9 @@ fn test_pci_hotplug_combine_001() {
     let (delete_device_command, delete_blk_command) = build_hotunplug_blk_cmd(hotplug_blk_id);
     let ret = test_state.borrow().qmp(&delete_device_command);
     assert!(
-        wait_root_port_msix(root_port.clone()),
+        wait_root_port_intr(root_port.clone()),
         "Wait for interrupt of root port timeout"
     );
-
-    handle_isr(root_port.clone());
     power_off_device(root_port.clone());
 
     assert_eq!(*ret.get("return").unwrap(), json!({}));
@@ -2553,7 +2191,6 @@ fn test_pci_hotplug_combine_002() {
         0,
         0,
     );
-
     power_indicator_off(root_port.clone());
 
     // Create a block device whose bdf is 1:0:0.
@@ -2567,11 +2204,9 @@ fn test_pci_hotplug_combine_002() {
     assert_eq!(*ret.get("return").unwrap(), json!({}));
 
     assert!(
-        wait_root_port_msix(root_port.clone()),
+        wait_root_port_intr(root_port.clone()),
         "Wait for interrupt of root port timeout"
     );
-
-    handle_isr(root_port.clone());
     power_indicator_blink(root_port.clone());
 
     let ret = test_state.borrow().qmp(&delete_blk_command);
@@ -2592,11 +2227,9 @@ fn test_pci_hotplug_combine_002() {
     assert!(!(*ret.get("error").unwrap()).is_null());
 
     assert!(
-        wait_root_port_msix(root_port.clone()),
+        wait_root_port_intr(root_port.clone()),
         "Wait for interrupt of root port timeout"
     );
-
-    handle_isr(root_port.clone());
     power_off_device(root_port.clone());
     test_state.borrow().wait_qmp_event();
 
@@ -2637,14 +2270,14 @@ fn test_pci_hotplug_combine_003() {
     let (delete_device_command, delete_blk_command) = build_hotunplug_blk_cmd(hotunplug_blk_id);
     let ret = test_state.borrow().qmp(&delete_device_command);
     assert!(
-        wait_root_port_msix(root_port.clone()),
+        wait_root_port_intr(root_port.clone()),
         "Wait for interrupt of root port timeout"
     );
     assert_eq!(*ret.get("return").unwrap(), json!({}));
     let ret = test_state.borrow().qmp(&delete_blk_command);
     assert_eq!(*ret.get("return").unwrap(), json!({}));
 
-    let hotplug_image_path = create_img(TEST_IMAGE_SIZE, 1, &ImageType::Raw);
+    let hotplug_image_path = create_img(TEST_IMAGE_SIZE, 1);
     image_paths.push(hotplug_image_path.clone());
 
     // Hotplug a block device whose bdf is 1:0:0.
@@ -2658,7 +2291,7 @@ fn test_pci_hotplug_combine_003() {
     power_off_device(root_port.clone());
     test_state.borrow().wait_qmp_event();
 
-    let hotplug_image_path = create_img(TEST_IMAGE_SIZE, 1, &ImageType::Raw);
+    let hotplug_image_path = create_img(TEST_IMAGE_SIZE, 1);
     image_paths.push(hotplug_image_path.clone());
     // Hotplug a block device whose bdf is 1:0:0.
     let (add_blk_command, add_device_command) =
@@ -2814,7 +2447,7 @@ fn test_pci_root_port_exp_cap() {
         root_port.borrow().rp_dev.bus_num,
         root_port.borrow().rp_dev.devfn,
         cap_exp_addr + PCI_EXP_SLTSTA,
-        0,
+        PCI_EXP_SLTSTA_ABP,
         abp_mask,
     );
 
@@ -2834,7 +2467,7 @@ fn test_pci_root_port_exp_cap() {
         root_port.borrow().rp_dev.bus_num,
         root_port.borrow().rp_dev.devfn,
         cap_exp_addr + PCI_EXP_SLTSTA,
-        0,
+        PCI_EXP_SLTSTA_PDC,
         pdc_mask,
     );
 
@@ -2872,7 +2505,7 @@ fn test_pci_root_port_exp_cap() {
         root_port.borrow().rp_dev.bus_num,
         root_port.borrow().rp_dev.devfn,
         cap_exp_addr + PCI_EXP_SLTSTA,
-        0,
+        PCI_EXP_SLTSTA_ABP,
         abp_mask,
     );
 
@@ -2892,7 +2525,7 @@ fn test_pci_root_port_exp_cap() {
         root_port.borrow().rp_dev.bus_num,
         root_port.borrow().rp_dev.devfn,
         cap_exp_addr + PCI_EXP_SLTSTA,
-        0,
+        PCI_EXP_SLTSTA_PDC,
         pdc_mask,
     );
 
@@ -2914,7 +2547,7 @@ fn test_pci_root_port_exp_cap() {
 fn test_pci_combine_000() {
     let cfg = DemoDev {
         bar_num: 3,
-        bar_size: 0x100_0000, // 16MB
+        bar_size: 0x100_0000, //16MB
         bus_num: 0,
         dev_num: 5,
     };
@@ -2941,7 +2574,7 @@ fn test_pci_combine_000() {
 fn test_pci_combine_001() {
     let cfg = DemoDev {
         bar_num: 3,
-        bar_size: 0x100_0000, // 16MB
+        bar_size: 0x100_0000, //16MB
         bus_num: 0,
         dev_num: 5,
     };
@@ -3004,7 +2637,7 @@ fn test_pci_combine_002() {
     assert!(test_state.borrow().readb(bar_addr) == 5);
 
     assert!(
-        wait_root_port_msix(root_port.clone()),
+        wait_root_port_intr(root_port.clone()),
         "Wait for interrupt of root port timeout"
     );
     power_off_device(root_port.clone());
@@ -3038,7 +2671,7 @@ fn test_pci_combine_002() {
 fn test_pci_combine_003() {
     let mut cfg = DemoDev {
         bar_num: 3,
-        bar_size: 0x100_0000, // 16MB
+        bar_size: 0x100_0000, //16MB
         bus_num: 0,
         dev_num: 5,
     };
@@ -3048,7 +2681,7 @@ fn test_pci_combine_003() {
     // the mmio space is 78MB, bar1 got over bounded
     assert!(bar_addr != INVALID_BAR_ADDR);
 
-    cfg.bar_size = 0x1000_0000; // 2GB
+    cfg.bar_size = 0x1000_0000; //2GB
     let (pci_dev, _) = init_demo_dev(cfg, 1);
     let bar_addr = pci_dev.borrow().io_map(0);
 

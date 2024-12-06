@@ -17,6 +17,9 @@ use std::slice::from_raw_parts;
 use std::{thread, time};
 
 use rand::Rng;
+use util::aio::{aio_probe, AioEngine};
+use util::byte_code::ByteCode;
+use util::offset_of;
 
 use mod_test::libdriver::machine::TestStdMachine;
 use mod_test::libdriver::malloc::GuestAllocator;
@@ -25,11 +28,8 @@ use mod_test::libdriver::virtio::{
     VIRTIO_F_BAD_FEATURE, VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC,
 };
 use mod_test::libdriver::virtio_pci_modern::TestVirtioPciDev;
-use mod_test::libtest::{test_init, TestState, MACHINE_TYPE_ARG};
-use mod_test::utils::{cleanup_img, create_img, ImageType, TEST_IMAGE_SIZE};
-use util::aio::{aio_probe, AioEngine};
-use util::byte_code::ByteCode;
-use util::offset_of;
+use mod_test::libtest::{test_init, TestState};
+use mod_test::utils::{cleanup_img, create_img, TEST_IMAGE_SIZE};
 
 const TEST_VIRTIO_SCSI_CDB_SIZE: usize = 32;
 const TEST_VIRTIO_SCSI_SENSE_SIZE: usize = 96;
@@ -62,6 +62,7 @@ const READ_TOC: u8 = 0x43;
 
 const VIRTIO_SCSI_S_OK: u8 = 0;
 const VIRTIO_SCSI_S_BAD_TARGET: u8 = 3;
+const VIRTIO_SCSI_S_FAILURE: u8 = 9;
 
 /// Mode page codes for mode sense/set.
 const MODE_PAGE_CACHING: u8 = 0x08;
@@ -91,9 +92,6 @@ const INQUIRY_REFERRALS_DATA_LEN: u8 = 64;
 const READ_TOC_DATA_LEN: u8 = 20;
 const READ_TOC_MSF_DATA_LEN: u8 = 12;
 const READ_TOC_FORMAT_DATA_LEN: u8 = 12;
-
-const GOOD: u8 = 0x00;
-const CHECK_CONDITION: u8 = 0x02;
 
 struct VirtioScsiTest {
     cntlr: Rc<RefCell<TestVirtioPciDev>>,
@@ -126,7 +124,7 @@ impl VirtioScsiTest {
         image_size: u64,
         iothread: bool,
     ) -> VirtioScsiTest {
-        let image_path = Rc::new(create_img(image_size, 1, &ImageType::Raw));
+        let image_path = Rc::new(create_img(image_size, 1));
 
         let cntlrcfg = CntlrConfig {
             id: 0,
@@ -151,7 +149,7 @@ impl VirtioScsiTest {
         }];
 
         let (cntlr, state, alloc) = scsi_test_init(cntlrcfg, scsi_devices.clone());
-        let features = virtio_scsi_default_feature(cntlr.clone());
+        let features = virtio_scsi_defalut_feature(cntlr.clone());
         let queues = cntlr
             .borrow_mut()
             .init_device(state.clone(), alloc.clone(), features, 3);
@@ -187,7 +185,10 @@ impl VirtioScsiTest {
 
         // Request Header.
         let cmdreq_len = size_of::<TestVirtioScsiCmdReq>() as u64;
-        let req_addr = self.alloc.borrow_mut().alloc(cmdreq_len);
+        let req_addr = self
+            .alloc
+            .borrow_mut()
+            .alloc(cmdreq_len.try_into().unwrap());
         let req_bytes = req.as_bytes();
         self.state.borrow().memwrite(req_addr, req_bytes);
 
@@ -201,7 +202,7 @@ impl VirtioScsiTest {
         if let Some(data) = data_out {
             let out_len = data.len() as u32;
             let out_bytes = data.as_bytes().to_vec();
-            let out_addr = self.alloc.borrow_mut().alloc(out_len as u64);
+            let out_addr = self.alloc.borrow_mut().alloc(out_len.try_into().unwrap());
             self.state.borrow().memwrite(out_addr, out_bytes.as_slice());
             data_entries.push(TestVringDescEntry {
                 data: out_addr,
@@ -215,7 +216,7 @@ impl VirtioScsiTest {
         let resp_addr = self
             .alloc
             .borrow_mut()
-            .alloc(cmdresp_len + data_in_len as u64);
+            .alloc((cmdresp_len + data_in_len as u64).try_into().unwrap());
         let resp_bytes = resp.as_bytes();
         self.state.borrow().memwrite(resp_addr, resp_bytes);
 
@@ -283,7 +284,6 @@ impl VirtioScsiTest {
         );
 
         assert_eq!(scsi_resp.response, cdb_test.expect_response);
-        assert_eq!(scsi_resp.status, cdb_test.expect_status);
         if let Some(result_vec) = cdb_test.expect_result_data {
             assert_eq!(result_vec, data_in);
         }
@@ -312,47 +312,42 @@ impl VirtioScsiTest {
     fn scsi_try_io(&mut self, target: u8, lun: u16, scsi_type: ScsiDeviceType) {
         // Test: scsi command: WRITE_10.
         // Write to LBA(logical block address) 0, transfer length 1 sector.
-        // Test Result: Check if scsi command WRITE_10 was handled successfully for scsi harddisk
-        // and was failure for scsi CD-ROM.
+        // Test Result: Check if scsi command WRITE_10 was handled successfully for scsi harddisk and
+        // was failure for scsi CD-ROM.
         let mut write_cdb = [0_u8; TEST_VIRTIO_SCSI_CDB_SIZE];
         write_cdb[0] = WRITE_10;
-        write_cdb[8] = 0x1; // 1 logical sector. CD: 2048 Bytes. HD: 512 Bytes.
-        let (expect_status, expect_sense, data) = if scsi_type == ScsiDeviceType::ScsiHd {
-            (GOOD, None, vec![0x8; 512])
-        } else {
-            (
-                CHECK_CONDITION,
-                Some(get_sense_bytes(SCSI_SENSE_IO_ERROR)),
-                vec![0x8; 2048],
-            )
-        };
+        write_cdb[8] = 0x1; // 1 sector.
+        let data = vec![0x8; 512];
         let write_data = String::from_utf8(data).unwrap();
-
+        let expect_response = if scsi_type == ScsiDeviceType::ScsiHd {
+            VIRTIO_SCSI_S_OK
+        } else {
+            VIRTIO_SCSI_S_FAILURE
+        };
         let cdb_test_args = CdbTest {
             cdb: write_cdb,
             target,
             lun,
             data_out: Some(write_data.clone()),
             data_in_length: 0,
-            expect_response: VIRTIO_SCSI_S_OK,
-            expect_status,
+            expect_response,
             expect_result_data: None,
-            expect_sense,
+            expect_sense: None,
         };
         self.scsi_cdb_test(cdb_test_args);
 
         // Test: scsi command: READ_10.
         // Read from LBA(logical block address) 0, transfer length 1.
-        // Test Result: Check if scsi command READ_10 was handled successfully. And check the read
-        // data is the right data which was sent in WRITE_10 test for scsi harddisk.
+        // Test Result: Check if scsi command READ_10 was handled successfully. And check the read data is
+        // the right data which was sent in WRITE_10 test for scsi harddisk.
         let mut read_cdb = [0_u8; TEST_VIRTIO_SCSI_CDB_SIZE];
         read_cdb[0] = READ_10;
         read_cdb[8] = 0x1; // 1 sector.
 
-        let data_in_length = write_data.len() as u32;
-        let expect_result_data = match scsi_type {
-            ScsiDeviceType::ScsiHd => Some(write_data.into_bytes()),
-            ScsiDeviceType::ScsiCd => None,
+        let (data_in_length, expect_result_data) = if scsi_type == ScsiDeviceType::ScsiHd {
+            (write_data.len(), Some(write_data.into_bytes()))
+        } else {
+            (0, None)
         };
 
         let cdb_test_args = CdbTest {
@@ -360,9 +355,8 @@ impl VirtioScsiTest {
             target,
             lun,
             data_out: None,
-            data_in_length, // Read 1 sector data.
+            data_in_length: data_in_length as u32, // Read 1 sector data.
             expect_response: VIRTIO_SCSI_S_OK,
-            expect_status: GOOD,
             expect_result_data,
             expect_sense: None,
         };
@@ -377,7 +371,6 @@ struct CdbTest {
     data_out: Option<String>,
     data_in_length: u32,
     expect_response: u8,
-    expect_status: u8,
     expect_result_data: Option<Vec<u8>>,
     expect_sense: Option<[u8; TEST_VIRTIO_SCSI_SENSE_SIZE]>,
 }
@@ -414,12 +407,6 @@ const SCSI_SENSE_NO_SENSE: ScsiSense = ScsiSense {
     key: 0,
     asc: 0,
     ascq: 0,
-};
-
-const SCSI_SENSE_IO_ERROR: ScsiSense = ScsiSense {
-    key: 0x0b,
-    asc: 0,
-    ascq: 0x06,
 };
 
 #[repr(C, packed)]
@@ -573,7 +560,7 @@ fn get_sense_bytes(sense: ScsiSense) -> [u8; TEST_VIRTIO_SCSI_SENSE_SIZE] {
     bytes
 }
 
-pub fn virtio_scsi_default_feature(cntlr: Rc<RefCell<TestVirtioPciDev>>) -> u64 {
+pub fn virtio_scsi_defalut_feature(cntlr: Rc<RefCell<TestVirtioPciDev>>) -> u64 {
     let mut features = cntlr.borrow().get_device_features();
     features &=
         !(VIRTIO_F_BAD_FEATURE | 1 << VIRTIO_RING_F_INDIRECT_DESC | 1 << VIRTIO_RING_F_EVENT_IDX);
@@ -589,7 +576,7 @@ fn scsi_test_init(
     Rc<RefCell<TestState>>,
     Rc<RefCell<GuestAllocator>>,
 ) {
-    let mut args: Vec<&str> = MACHINE_TYPE_ARG.split(' ').collect();
+    let mut args: Vec<&str> = "-machine virt".split(' ').collect();
 
     let pci_fn = 0;
     let pci_slot = 0x4;
@@ -632,8 +619,8 @@ fn scsi_test_init(
 /// Virtio Scsi hard disk basic function test. target 31, lun 7.
 /// TestStep:
 ///   0. Init process.
-///   1. Traverse all possible targets from 0 to VIRTIO_SCSI_MAX_TARGET(255). (using scsi command
-///      INQUIRY) (lun is always 0 in this traverse process).
+///   1. Traverse all possible targets from 0 to VIRTIO_SCSI_MAX_TARGET(255).
+///      (using scsi command INQUIRY) (lun is always 0 in this traverse process).
 ///   2. Get all luns info in target 31.(using scsi command REPORT_LUNS)
 ///   3. Check if scsi device is OK.(using scsi command TEST_UNIT_READY)
 ///   4. Get the capacity of the disk.(using scsi command READ_CAPACITY_10)
@@ -663,8 +650,7 @@ fn scsi_hd_basic_test() {
     inquiry_cdb[0] = INQUIRY;
     inquiry_cdb[4] = INQUIRY_DATA_LEN;
     for i in 0..32 {
-        // Test 1 Result: Only response 0 for target == 31. Otherwise response
-        //                VIRTIO_SCSI_S_BAD_TARGET.
+        // Test 1 Result: Only response 0 for target == 31. Otherwise response VIRTIO_SCSI_S_BAD_TARGET.
         let expect_result = if i == target as u16 {
             VIRTIO_SCSI_S_OK
         } else {
@@ -677,7 +663,6 @@ fn scsi_hd_basic_test() {
             data_out: None,
             data_in_length: INQUIRY_DATA_LEN as u32,
             expect_response: expect_result,
-            expect_status: GOOD,
             expect_result_data: None,
             expect_sense: None,
         };
@@ -707,14 +692,13 @@ fn scsi_hd_basic_test() {
         data_out: None,
         data_in_length: REPORT_LUNS_DATA_LEN as u32,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: GOOD,
         expect_result_data: Some(expect_result_vec),
         expect_sense: None,
     };
     vst.scsi_cdb_test(cdb_test_args);
 
-    // Test 3: scsi command: TEST_UNIT_READY.
-    // Test 3 Result: Check if scsi command TEST_UNIT_READY was handled successfully.
+    // Test 3: scsi command: TESE_UNIT_READY.
+    // Test 3 Result: Check if scsi command TESE_UNIT_READY was handled successfully.
     let mut test_unit_ready_cdb = [0_u8; TEST_VIRTIO_SCSI_CDB_SIZE];
     test_unit_ready_cdb[0] = TEST_UNIT_READY;
     let cdb_test_args = CdbTest {
@@ -724,7 +708,6 @@ fn scsi_hd_basic_test() {
         data_out: None,
         data_in_length: 0,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: GOOD,
         expect_result_data: None,
         expect_sense: None,
     };
@@ -742,14 +725,12 @@ fn scsi_hd_basic_test() {
         data_out: None,
         data_in_length: READ_CAPACITY_10_DATA_LEN as u32,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: GOOD,
         expect_result_data: None,
         expect_sense: None,
     };
     let data_in = vst.scsi_cdb_test(cdb_test_args);
 
-    // Bytes[0-3]: Returned Logical Block Address(the logical block address of the last logical
-    //             block).
+    // Bytes[0-3]: Returned Logical Block Address(the logical block address of the last logical block).
     // Bytes[4-7]: Logical Block Length In Bytes.
     // Total size = (last logical block address + 1) * block length.
     assert_eq!(
@@ -795,7 +776,6 @@ fn scsi_hd_basic_test() {
         data_out: None,
         data_in_length: MODE_SENSE_PAGE_CACHE_LEN_DATA_LEN as u32,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: GOOD,
         expect_result_data: Some(expect_result_vec),
         expect_sense: None,
     };
@@ -840,7 +820,6 @@ fn scsi_hd_basic_test() {
         data_out: None,
         data_in_length: MODE_SENSE_PAGE_ALL_DATA_LEN as u32,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: GOOD,
         expect_result_data: Some(expect_result_vec),
         expect_sense: None,
     };
@@ -863,7 +842,6 @@ fn scsi_hd_basic_test() {
         data_out: None,
         data_in_length: INQUIRY_DATA_LEN as u32,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: GOOD,
         expect_result_data: None,
         expect_sense: None,
     };
@@ -887,7 +865,6 @@ fn scsi_hd_basic_test() {
         data_out: None,
         data_in_length: INQUIRY_SUPPORTED_VPD_PAGES_DATA_LEN as u32,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: GOOD,
         expect_result_data: Some(expect_result_vec),
         expect_sense: None,
     };
@@ -908,7 +885,6 @@ fn scsi_hd_basic_test() {
         data_out: None,
         data_in_length: INQUIRY_UNIT_SERIAL_NUMBER_DATA_LEN as u32,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: GOOD,
         expect_result_data: None,
         expect_sense: None,
     };
@@ -933,7 +909,6 @@ fn scsi_hd_basic_test() {
         data_out: None,
         data_in_length: INQUIRY_DEVICE_IDENTIFICATION_DATA_LEN as u32,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: GOOD,
         expect_result_data: None,
         expect_sense: None,
     };
@@ -955,7 +930,6 @@ fn scsi_hd_basic_test() {
         data_out: None,
         data_in_length: INQUIRY_BLOCK_LIMITS_DATA_LEN as u32,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: GOOD,
         expect_result_data: None,
         expect_sense: None,
     };
@@ -983,7 +957,6 @@ fn scsi_hd_basic_test() {
         data_out: None,
         data_in_length: INQUIRY_BLOCK_DEVICE_CHARACTERISTICS_DATA_LEN as u32,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: GOOD,
         expect_result_data: Some(expect_result_vec),
         expect_sense: None,
     };
@@ -1012,7 +985,6 @@ fn scsi_hd_basic_test() {
         data_out: None,
         data_in_length: INQUIRY_LOGICAL_BLOCK_PROVISIONING_DATA_LEN as u32,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: GOOD,
         expect_result_data: Some(expect_result_vec),
         expect_sense: None,
     };
@@ -1033,7 +1005,6 @@ fn scsi_hd_basic_test() {
         data_out: None,
         data_in_length: INQUIRY_REFERRALS_DATA_LEN as u32,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: CHECK_CONDITION,
         expect_result_data: None,
         expect_sense: Some(expect_sense),
     };
@@ -1091,14 +1062,14 @@ fn scsi_cd_basic_test() {
     // Byte[8]: BUF/Multi Session(1)/Mode 2 Form 2(1)/Mode 2 Form 1(1)/Digital Port 2(1)/
     //          Digital Port 1(1)/Composite(1)/Audio Play(1).
     expect_result_vec[8] = 0x7f;
-    // Byte[9]: Read Bar Code(1)/UPC(1)/ISRC(1)/C2 Pointers supported(1)/R-W Deinterleaved &
-    //          corrected(1)/R-W supported(1)/CD-DA Stream is Accurate(1)/CD-DA Cmds supported(1).
+    // Byte[9]: Read Bar Code(1)/UPC(1)/ISRC(1)/C2 Pointers supported(1)/R-W Deinterleaved & corrected(1)/
+    //          R-W supported(1)/CD-DA Stream is Accurate(1)/CD-DA Cmds supported(1).
     expect_result_vec[9] = 0xff;
     // Byte[10]: Bits[5-7]: Loading Mechanism Type(1)/Reserved/Eject(1)/Prevent Jumper(1)/
     //           Lock State/Lock(1).
     expect_result_vec[10] = 0x2d;
-    // Byte[11]: Bits[6-7]: Reserved/R-W in Lead-in/Side Change Capable/SSS/Changer Supports Disc
-    //           Present/Separate Channel Mute/Separate volume levels
+    // Byte[11]: Bits[6-7]: Reserved/R-W in Lead-in/Side Change Capable/SSS/Changer Supports Disc Present/
+    //           Separate Channel Mute/Separate volume levels
     // Bytes[12-13]: Obsolete.
     // Bytes[14-15]: Number of Volume Levels Supported.
     expect_result_vec[15] = 0x2;
@@ -1112,7 +1083,6 @@ fn scsi_cd_basic_test() {
         data_out: None,
         data_in_length: MODE_SENSE_LEN_DATA_LEN as u32,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: GOOD,
         expect_result_data: Some(expect_result_vec),
         expect_sense: None,
     };
@@ -1131,7 +1101,6 @@ fn scsi_cd_basic_test() {
         data_out: None,
         data_in_length: TEST_SCSI_SENSE_LEN as u32,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: GOOD,
         expect_result_data: None,
         expect_sense: Some(get_sense_bytes(SCSI_SENSE_NO_SENSE)),
     };
@@ -1140,8 +1109,8 @@ fn scsi_cd_basic_test() {
     // Test 3: scsi command: READ_TOC.
     // Test 3.1:
     // Byte1 bit1: MSF = 0. Byte2 bits[0-3]: Format = 0;
-    // Test 3.1 Result: Check if scsi command READ_TOC was handled successfully. And check the read
-    // data is the same with the expect result.
+    // Test 3.1 Result: Check if scsi command READ_TOC was handled successfully. And check the read data
+    // is the same with the expect result.
     let mut read_toc_cdb = [0_u8; TEST_VIRTIO_SCSI_CDB_SIZE];
     read_toc_cdb[0] = READ_TOC;
     read_toc_cdb[8] = READ_TOC_DATA_LEN;
@@ -1174,7 +1143,6 @@ fn scsi_cd_basic_test() {
         data_out: None,
         data_in_length: READ_TOC_DATA_LEN as u32,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: GOOD,
         expect_result_data: Some(expect_result_vec),
         expect_sense: None,
     };
@@ -1184,8 +1152,8 @@ fn scsi_cd_basic_test() {
     // Byte1 bit1: MSF = 1.
     // Byte2 bits[0-3]: Format = 0; (Format(Select specific returned data format)(CD: 0,1,2)).
     // Byte6: Track/Session Number.
-    // Test 3.2 Result: Check if scsi command READ_TOC was handled successfully. And check the read
-    // data is the same with the expect result.
+    // Test 3.2 Result: Check if scsi command READ_TOC was handled successfully. And check the read data
+    // is the same with the expect result.
     let mut read_toc_cdb = [0_u8; TEST_VIRTIO_SCSI_CDB_SIZE];
     read_toc_cdb[0] = READ_TOC;
     read_toc_cdb[1] = 2;
@@ -1207,7 +1175,6 @@ fn scsi_cd_basic_test() {
         data_out: None,
         data_in_length: READ_TOC_MSF_DATA_LEN as u32,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: GOOD,
         expect_result_data: Some(expect_result_vec),
         expect_sense: None,
     };
@@ -1217,8 +1184,8 @@ fn scsi_cd_basic_test() {
     // Byte1 bit1: MSF = 0.
     // Byte2 bits[0-3]: Format = 1; (Format(Select specific returned data format)(CD: 0,1,2)).
     // Byte6: Track/Session Number.
-    // Test 3.3 Result: Check if scsi command READ_TOC was handled successfully. And check the read
-    // data is the same with the expect result.
+    // Test 3.3 Result: Check if scsi command READ_TOC was handled successfully. And check the read data
+    // is the same with the expect result.
     let mut read_toc_cdb = [0_u8; TEST_VIRTIO_SCSI_CDB_SIZE];
     read_toc_cdb[0] = READ_TOC;
     read_toc_cdb[2] = 1;
@@ -1231,28 +1198,25 @@ fn scsi_cd_basic_test() {
         data_out: None,
         data_in_length: READ_TOC_FORMAT_DATA_LEN as u32,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: GOOD,
         expect_result_data: Some(expect_result_vec),
         expect_sense: None,
     };
     vst.scsi_cdb_test(cdb_test_args);
 
     // Test 4: scsi command: READ_DISC_INFORMATION.
-    // Test 4 Result: Check if scsi command READ_DISC_INFORMATION was handled successfully. And
-    // check the read data is the same with the expect result.
+    // Test 4 Result: Check if scsi command READ_DISC_INFORMATION was handled successfully. And check the read data
+    // is the same with the expect result.
     let mut read_disc_information_cdb: [u8; TEST_VIRTIO_SCSI_CDB_SIZE] =
         [0; TEST_VIRTIO_SCSI_CDB_SIZE];
     read_disc_information_cdb[0] = READ_DISC_INFORMATION;
     read_disc_information_cdb[8] = READ_DISC_INFORMATION_DATA_LEN;
     // Bytes[0-1]: Disc Information Length(32).
-    // Byte2: Disc Information Data Type(000b) | Erasable(0) | State of last Session(01b) |
-    //        Disc Status(11b).
+    // Byte2: Disc Information Data Type(000b) | Erasable(0) | State of last Session(01b) | Disc Status(11b).
     // Byte3: Number of First Track on Disc.
     // Byte4: Number of Sessions.
     // Byte5: First Track Number in Last Session(Least Significant Byte).
     // Byte6: Last Track Number in Last Session(Last Significant Byte).
-    // Byte7: DID_V | DBC_V | URU:Unrestricted Use Disc(1) | DAC_V | Reserved | Legacy |
-    //        BG Format Status.
+    // Byte7: DID_V | DBC_V | URU:Unrestricted Use Disc(1) | DAC_V | Reserved | Legacy | BG Format Status.
     // Byte8: Disc Type(00h: CD-DA or CD-ROM Disc).
     // Byte9: Number of sessions(Most Significant Byte).
     // Byte10: First Trace Number in Last Session(Most Significant Byte).
@@ -1272,7 +1236,6 @@ fn scsi_cd_basic_test() {
         data_out: None,
         data_in_length: READ_DISC_INFORMATION_DATA_LEN as u32,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: GOOD,
         expect_result_data: Some(expect_result_vec),
         expect_sense: None,
     };
@@ -1280,8 +1243,8 @@ fn scsi_cd_basic_test() {
 
     // Test 5: scsi command: GET_CONFIGURATION.
     // The size of test img is TEST_IMAGE_SIZE(64M), so it is a CD-ROM.
-    // Test 5 Result: Check if scsi command GET_CONFIGURATION was handled successfully. And check
-    // the read data is the same with the expect result.
+    // Test 5 Result: Check if scsi command GET_CONFIGURATION was handled successfully. And check the read data
+    // is the same with the expect result.
     let mut get_configuration_cdb = [0_u8; TEST_VIRTIO_SCSI_CDB_SIZE];
     get_configuration_cdb[0] = GET_CONFIGURATION;
     get_configuration_cdb[8] = GET_CONFIGURATION_DATA_LEN;
@@ -1312,8 +1275,7 @@ fn scsi_cd_basic_test() {
     // Bytes[20-31]: Feature 1: Core Feature:
     // Bytes[20-21]: Feature Code(0001h).
     expect_result_vec[21] = 0x1;
-    // Byte[22]: Bits[6-7]: Reserved. Bits[2-5]: Version(0010b). Bit 1: Persistent(1).
-    //           Bit 0: Current(1).
+    // Byte[22]: Bits[6-7]: Reserved. Bits[2-5]: Version(0010b). Bit 1: Persistent(1). Bit 0: Current(1).
     expect_result_vec[22] = 0xb;
     // Byte[23]: Additional Length(8).
     expect_result_vec[23] = 8;
@@ -1325,13 +1287,12 @@ fn scsi_cd_basic_test() {
     // Bytes[32-40]: Feature 2: Removable media feature:
     // Bytes[32-33]: Feature Code(0003h).
     expect_result_vec[33] = 3;
-    // Byte[34]: Bits[6-7]: Reserved. Bit[2-5]: Version(0010b). Bit 1: Persistent(1).
-    //           Bit 0: Current(1).
+    // Byte[34]: Bits[6-7]: Reserved. Bit[2-5]: Version(0010b). Bit 1: Persistent(1). Bit 0: Current(1).
     expect_result_vec[34] = 0xb;
     // Byte[35]: Additional Length(4).
     expect_result_vec[35] = 4;
-    // Byte[36]: Bits[5-7]: Loading Mechanism Type(001b). Bit4: Load(1). Bit 3: Eject(1).
-    //           Bit 2: Pvnt Jmpr. Bit 1: DBML. Bit 0: Lock(1).
+    // Byte[36]: Bits[5-7]: Loading Mechanism Type(001b). Bit4: Load(1). Bit 3: Eject(1). Bit 2: Pvnt Jmpr.
+    //           Bit 1: DBML. Bit 0: Lock(1).
     expect_result_vec[36] = 0x39;
     // Byte[37-39]: Reserved.
     let cdb_test_args = CdbTest {
@@ -1341,15 +1302,14 @@ fn scsi_cd_basic_test() {
         data_out: None,
         data_in_length: GET_CONFIGURATION_DATA_LEN as u32,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: GOOD,
         expect_result_data: Some(expect_result_vec),
         expect_sense: None,
     };
     vst.scsi_cdb_test(cdb_test_args);
 
     // Test 6: scsi command: GET_EVENT_STATUS_NOTIFICATION.
-    // Test 6 Result: Check if scsi command GET_EVENT_STATUS_NOTIFICATION was handled successfully.
-    // And check the read data is the same with the expect result.
+    // Test 6 Result: Check if scsi command GET_EVENT_STATUS_NOTIFICATION was handled successfully. And check the read data
+    // is the same with the expect result.
     let mut get_event_status_notification_cdb: [u8; TEST_VIRTIO_SCSI_CDB_SIZE] =
         [0; TEST_VIRTIO_SCSI_CDB_SIZE];
     get_event_status_notification_cdb[0] = GET_EVENT_STATUS_NOTIFICATION;
@@ -1377,7 +1337,6 @@ fn scsi_cd_basic_test() {
         data_out: None,
         data_in_length: GET_EVENT_STATUS_NOTIFICATION_DATA_LEN as u32,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: GOOD,
         expect_result_data: Some(expect_result_vec),
         expect_sense: None,
     };
@@ -1399,7 +1358,7 @@ fn scsi_cd_basic_test() {
 ///   1. Test scsi command REPORT_LUNS.
 ///   2. Test scsi command INQUIRY.
 ///   3. Test scsi command REQUEST_SENSE.
-///   4. Test scsi command TEST_UNIT_READY.
+///   4. Test scsi command TESE_UNIT_READY.
 ///   5. Test other scsi command, e.g. READ_CAPACITY_10.
 ///   6. Destroy device.
 /// Expect:
@@ -1425,7 +1384,6 @@ fn scsi_target_cdb_test() {
         data_out: None,
         data_in_length: REPORT_LUNS_DATA_LEN as u32,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: GOOD,
         expect_result_data: Some(expect_result_vec),
         expect_sense: None,
     };
@@ -1449,7 +1407,6 @@ fn scsi_target_cdb_test() {
         data_out: None,
         data_in_length: INQUIRY_TARGET_DATA_LEN as u32,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: GOOD,
         expect_result_data: Some(expect_result_vec),
         expect_sense: None,
     };
@@ -1482,7 +1439,6 @@ fn scsi_target_cdb_test() {
         data_out: None,
         data_in_length: INQUIRY_TARGET_DATA_LEN as u32,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: GOOD,
         expect_result_data: Some(expect_result_vec),
         expect_sense: None,
     };
@@ -1505,7 +1461,6 @@ fn scsi_target_cdb_test() {
         data_out: None,
         data_in_length: INQUIRY_TARGET_DATA_LEN as u32,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: GOOD,
         expect_result_data: None,
         expect_sense: None,
     };
@@ -1526,7 +1481,6 @@ fn scsi_target_cdb_test() {
         data_out: None,
         data_in_length: INQUIRY_TARGET_DATA_LEN as u32,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: CHECK_CONDITION,
         expect_result_data: None,
         expect_sense: Some(get_sense_bytes(SCSI_SENSE_INVALID_FIELD)),
     };
@@ -1547,7 +1501,6 @@ fn scsi_target_cdb_test() {
         data_out: None,
         data_in_length: INQUIRY_TARGET_DATA_LEN as u32,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: CHECK_CONDITION,
         expect_result_data: None,
         expect_sense: Some(get_sense_bytes(SCSI_SENSE_INVALID_FIELD)),
     };
@@ -1567,7 +1520,6 @@ fn scsi_target_cdb_test() {
         data_out: None,
         data_in_length: TEST_SCSI_SENSE_LEN,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: GOOD,
         expect_result_data: None,
         expect_sense: Some(get_sense_bytes(SCSI_SENSE_LUN_NOT_SUPPORTED)),
     };
@@ -1586,14 +1538,13 @@ fn scsi_target_cdb_test() {
         data_out: None,
         data_in_length: TEST_SCSI_SENSE_LEN,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: GOOD,
         expect_result_data: None,
         expect_sense: None,
     };
     vst.scsi_cdb_test(cdb_test_args);
 
-    // Test 4: scsi command: TEST_UNIT_READY.
-    // Test 4 Result: Check if scsi command TEST_UNIT_READY was handled successfully.
+    // Test 4: scsi command: TESE_UNIT_READY.
+    // Test 4 Result: Check if scsi command TESE_UNIT_READY was handled successfully.
     let mut test_unit_ready_cdb = [0_u8; TEST_VIRTIO_SCSI_CDB_SIZE];
     test_unit_ready_cdb[0] = TEST_UNIT_READY;
     let cdb_test_args = CdbTest {
@@ -1603,7 +1554,6 @@ fn scsi_target_cdb_test() {
         data_out: None,
         data_in_length: 0,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: GOOD,
         expect_result_data: None,
         expect_sense: None,
     };
@@ -1621,7 +1571,6 @@ fn scsi_target_cdb_test() {
         data_out: None,
         data_in_length: READ_CAPACITY_10_DATA_LEN as u32,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: CHECK_CONDITION,
         expect_result_data: None,
         expect_sense: Some(get_sense_bytes(SCSI_SENSE_INVALID_OPCODE)),
     };
@@ -1650,14 +1599,14 @@ struct VirtioScsiConfig {
 /// can be set from guest.
 /// TestStep:
 ///   1. Init process.
-///   2. For every parameter in VirtioScsiConfig, do check just like: Read default value -> Set
-///      other value -> Read value again -> Check if value was set successfully.
+///   2. For every parameter in VirtioScsiConfig, do check just like:
+///      Read default value -> Set other value -> Read value again -> Check if value was setted successfully.
 ///   3. Destroy device.
 /// Note:
 ///   1. sense size and cdb size can not be changed in stratovirt now. So, they are 0 now.
 /// Expect:
 ///   1/2/3: success.
-///   2: only sense_size and cdb_size are set successfully.
+///   2: only sense_size and cdb_size are setted successfully.
 #[test]
 fn device_config_test() {
     let target = 0x0;
@@ -1867,13 +1816,13 @@ fn aio_model_test() {
 
     if aio_probe(AioEngine::IoUring).is_ok() {
         // Scsi Disk 1. AIO io_uring. Direct false.
-        let image_path = Rc::new(create_img(TEST_IMAGE_SIZE, 0, &ImageType::Raw));
+        let image_path = Rc::new(create_img(TEST_IMAGE_SIZE, 0));
         device_vec.push(ScsiDeviceConfig {
             cntlr_id: 0,
             device_type: ScsiDeviceType::ScsiHd,
             image_path: image_path.clone(),
-            target,
-            lun,
+            target: target,
+            lun: lun,
             read_only: false,
             direct: false,
             aio: TestAioType::AioIOUring,
@@ -1882,13 +1831,13 @@ fn aio_model_test() {
 
         // Scsi Disk 2. AIO io_uring. Direct true.
         lun += 1;
-        let image_path = Rc::new(create_img(TEST_IMAGE_SIZE, 1, &ImageType::Raw));
+        let image_path = Rc::new(create_img(TEST_IMAGE_SIZE, 1));
         device_vec.push(ScsiDeviceConfig {
             cntlr_id: 0,
             device_type: ScsiDeviceType::ScsiHd,
             image_path: image_path.clone(),
-            target,
-            lun,
+            target: target,
+            lun: lun,
             read_only: false,
             direct: true,
             aio: TestAioType::AioIOUring,
@@ -1899,15 +1848,15 @@ fn aio_model_test() {
     // Scsi Disk 3. AIO OFF. Direct true. This is not allowed.
     // Stratovirt will report "low performance expect when use sync io with direct on"
 
-    // Scsi Disk 4. AIO OFF. Direct false.
+    //Scsi Disk 4. AIO OFF. Direct false.
     lun += 1;
-    let image_path = Rc::new(create_img(TEST_IMAGE_SIZE, 0, &ImageType::Raw));
+    let image_path = Rc::new(create_img(TEST_IMAGE_SIZE, 0));
     device_vec.push(ScsiDeviceConfig {
         cntlr_id: 0,
         device_type: ScsiDeviceType::ScsiHd,
         image_path: image_path.clone(),
-        target,
-        lun,
+        target: target,
+        lun: lun,
         read_only: false,
         direct: false,
         aio: TestAioType::AioOff,
@@ -1919,13 +1868,13 @@ fn aio_model_test() {
     if aio_probe(AioEngine::Native).is_ok() {
         // Scsi Disk 6. AIO native. Direct true.
         lun += 1;
-        let image_path = Rc::new(create_img(TEST_IMAGE_SIZE, 1, &ImageType::Raw));
+        let image_path = Rc::new(create_img(TEST_IMAGE_SIZE, 1));
         device_vec.push(ScsiDeviceConfig {
             cntlr_id: 0,
             device_type: ScsiDeviceType::ScsiHd,
             image_path: image_path.clone(),
-            target,
-            lun,
+            target: target,
+            lun: lun,
             read_only: false,
             direct: true,
             aio: TestAioType::AioNative,
@@ -1934,7 +1883,7 @@ fn aio_model_test() {
     }
 
     let (cntlr, state, alloc) = scsi_test_init(cntlrcfg, device_vec.clone());
-    let features = virtio_scsi_default_feature(cntlr.clone());
+    let features = virtio_scsi_defalut_feature(cntlr.clone());
     let queues = cntlr
         .borrow_mut()
         .init_device(state.clone(), alloc.clone(), features, 3);
@@ -2246,9 +2195,8 @@ fn send_cd_command_to_hd_test() {
         target,
         lun,
         data_out: None,
-        data_in_length: MODE_SENSE_LEN_DATA_LEN as u32,
+        data_in_length: 0,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: CHECK_CONDITION,
         expect_result_data: None,
         expect_sense: Some(get_sense_bytes(SCSI_SENSE_INVALID_FIELD)),
     };
@@ -2265,9 +2213,8 @@ fn send_cd_command_to_hd_test() {
         target,
         lun,
         data_out: None,
-        data_in_length: READ_DISC_INFORMATION_DATA_LEN as u32,
+        data_in_length: 0,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: CHECK_CONDITION,
         expect_result_data: None,
         expect_sense: Some(get_sense_bytes(SCSI_SENSE_INVALID_FIELD)),
     };
@@ -2283,9 +2230,8 @@ fn send_cd_command_to_hd_test() {
         target,
         lun,
         data_out: None,
-        data_in_length: GET_CONFIGURATION_DATA_LEN as u32,
+        data_in_length: 0,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: CHECK_CONDITION,
         expect_result_data: None,
         expect_sense: Some(get_sense_bytes(SCSI_SENSE_INVALID_FIELD)),
     };
@@ -2301,13 +2247,12 @@ fn send_cd_command_to_hd_test() {
     get_event_status_notification_cdb[8] = GET_EVENT_STATUS_NOTIFICATION_DATA_LEN;
 
     let cdb_test_args = CdbTest {
-        cdb: get_event_status_notification_cdb,
+        cdb: get_configuration_cdb,
         target,
         lun,
         data_out: None,
-        data_in_length: GET_EVENT_STATUS_NOTIFICATION_DATA_LEN as u32,
+        data_in_length: 0,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: CHECK_CONDITION,
         expect_result_data: None,
         expect_sense: Some(get_sense_bytes(SCSI_SENSE_INVALID_FIELD)),
     };
@@ -2321,7 +2266,7 @@ fn send_cd_command_to_hd_test() {
 ///   1. Init process.
 ///   2. Send READ_10/WRITE_10 CDB.
 ///     2.1 READ_10/WRITE_10 transfer length is larger than disk size.
-///     2.2 READ_10/WRITE_10 read/write offset is larger than disk size.
+///     2.2 READ_10/WRITE_10 read/write offset is larget than disk size.
 ///   3. Wait for return value.
 ///   4. Destroy device.
 /// Expect:
@@ -2352,7 +2297,6 @@ fn wrong_io_test() {
         data_out: Some(write_data),
         data_in_length: 0,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: CHECK_CONDITION,
         expect_result_data: None,
         expect_sense: Some(get_sense_bytes(SCSI_SENSE_INVALID_OPCODE)),
     };
@@ -2371,14 +2315,13 @@ fn wrong_io_test() {
         data_out: None,
         data_in_length: 2048, // Read 2K data.
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: CHECK_CONDITION,
         expect_result_data: None,
         expect_sense: Some(get_sense_bytes(SCSI_SENSE_INVALID_OPCODE)),
     };
     vst.scsi_cdb_test(cdb_test_args);
 
     // Test3: scsi command: WRITE_10.
-    // Write to LBA(logical block address) 2K, transfer length 1 sector and disk is 1KB size.
+    // Write to LBA(logical block address) 2K, transfer length 1 secotr and disk is 1KB size.
     // Test Result: Check if scsi command WRITE_10 was failure.
     let mut write_cdb = [0_u8; TEST_VIRTIO_SCSI_CDB_SIZE];
     write_cdb[0] = WRITE_10;
@@ -2394,7 +2337,6 @@ fn wrong_io_test() {
         data_out: Some(write_data),
         data_in_length: 0,
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: CHECK_CONDITION,
         expect_result_data: None,
         expect_sense: Some(get_sense_bytes(SCSI_SENSE_INVALID_OPCODE)),
     };
@@ -2415,7 +2357,6 @@ fn wrong_io_test() {
         data_out: None,
         data_in_length: 512, // 1 sector data.
         expect_response: VIRTIO_SCSI_S_OK,
-        expect_status: CHECK_CONDITION,
         expect_result_data: None,
         expect_sense: Some(get_sense_bytes(SCSI_SENSE_INVALID_OPCODE)),
     };

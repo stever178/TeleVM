@@ -10,14 +10,12 @@
 // NON-INFRINGEMENT, MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 // See the Mulan PSL v2 for more details.
 
+use super::pci_bus::PciBusOps;
+use super::pci_bus::TestPciBus;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use super::pci_bus::PciBusOps;
-use super::pci_bus::TestPciBus;
-
 const BAR_MAP: [u8; 6] = [0x10, 0x14, 0x18, 0x1c, 0x20, 0x24];
-const PCI_PIN_NUM: u8 = 4;
 pub const PCI_VENDOR_ID: u8 = 0x00;
 pub const PCI_DEVICE_ID: u8 = 0x02;
 pub const PCI_COMMAND: u8 = 0x04;
@@ -25,7 +23,6 @@ pub const PCI_COMMAND: u8 = 0x04;
 const PCI_COMMAND_IO: u8 = 0x1;
 pub const PCI_COMMAND_MEMORY: u8 = 0x2;
 const PCI_COMMAND_MASTER: u8 = 0x4;
-pub const PCI_COMMAND_INTX_DISABLE: u16 = 0x400;
 
 pub const PCI_STATUS: u8 = 0x06;
 pub const PCI_STATUS_INTERRUPT: u16 = 0x08;
@@ -40,7 +37,6 @@ pub const PCI_SUBSYSTEM_VENDOR_ID: u8 = 0x2c;
 pub const PCI_SUBSYSTEM_ID: u8 = 0x2e;
 
 pub const PCI_CAPABILITY_LIST: u8 = 0x34;
-pub const PCI_INTERRUPT_PIN: u8 = 0x3d;
 pub const PCI_BRIDGE_CONTROL: u8 = 0x3e;
 pub const BRIDGE_CTL_SEC_BUS_RESET: u8 = 0x40;
 
@@ -77,10 +73,6 @@ pub const PCI_EXP_SLTSTA_CC: u16 = 0x0010;
 pub const PCI_EXP_SLTSTA_PDS: u16 = 0x0040;
 
 pub const PCI_EXP_SLTCTL: u8 = 0x18;
-pub const PCI_EXP_SLTCTL_ABPE: u16 = 0x0001;
-pub const PCI_EXP_SLTCTL_PDCE: u16 = 0x0008;
-pub const PCI_EXP_SLTCTL_CCIE: u16 = 0x0010;
-pub const PCI_EXP_SLTCTL_HPIE: u16 = 0x0020;
 pub const PCI_EXP_SLTCTL_PIC: u16 = 0x0300;
 pub const PCI_EXP_SLTCTL_PWR_IND_ON: u16 = 0x0100;
 pub const PCI_EXP_SLTCTL_PWR_IND_BLINK: u16 = 0x0200;
@@ -90,8 +82,6 @@ pub const PCI_EXP_SLTCTL_PWR_ON: u16 = 0x0000;
 pub const PCI_EXP_SLTCTL_PWR_OFF: u16 = 0x0400;
 pub type PCIBarAddr = u64;
 pub const INVALID_BAR_ADDR: u64 = u64::MAX;
-
-const PCI_LINK_GSI: [u32; 4] = [48, 49, 50, 51];
 
 pub trait PciMsixOps {
     fn set_msix_vector(&self, msix_entry: u16, msix_addr: u64, msix_data: u32);
@@ -108,7 +98,6 @@ pub struct TestPciDev {
     pub msix_table_off: u64,
     pub msix_pba_off: u64,
     pub msix_used_vectors: u32,
-    pub irq_num: u32,
 }
 
 impl TestPciDev {
@@ -123,7 +112,6 @@ impl TestPciDev {
             msix_table_off: 0,
             msix_pba_off: 0,
             msix_used_vectors: 0,
-            irq_num: std::u32::MAX,
         }
     }
 
@@ -161,27 +149,6 @@ impl TestPciDev {
         addr
     }
 
-    pub fn set_intx_irq_num(&mut self, slot: u8) {
-        let pin = ((self.config_readb(PCI_INTERRUPT_PIN) - 1 + slot) % PCI_PIN_NUM) as usize;
-        self.irq_num = PCI_LINK_GSI[pin];
-    }
-
-    pub fn has_intx(&self) -> bool {
-        self.pci_bus
-            .borrow()
-            .test_state
-            .borrow()
-            .query_intx(self.irq_num)
-    }
-
-    pub fn eoi_intx(&self) {
-        self.pci_bus
-            .borrow()
-            .test_state
-            .borrow()
-            .eoi_intx(self.irq_num);
-    }
-
     /// Enable MSI-X.
     ///
     /// # Arguments
@@ -198,18 +165,18 @@ impl TestPciDev {
         self.msix_table_bar = if let Some(addr) = bar_addr {
             addr
         } else {
-            self.io_map(bar_table as u8)
+            self.io_map(bar_table.try_into().unwrap())
         };
-        self.msix_table_off = (table & !PCI_MSIX_TABLE_BIR) as u64;
+        self.msix_table_off = (table & !PCI_MSIX_TABLE_BIR).try_into().unwrap();
 
         let table = self.config_readl(addr + PCI_MSIX_PBA);
         let bar_pba = table & PCI_MSIX_TABLE_BIR;
         if bar_pba != bar_table {
-            self.msix_pba_bar = self.io_map(bar_pba as u8);
+            self.msix_pba_bar = self.io_map(bar_pba.try_into().unwrap());
         } else {
             self.msix_pba_bar = self.msix_table_bar;
         }
-        self.msix_pba_off = (table & !PCI_MSIX_TABLE_BIR) as u64;
+        self.msix_pba_off = (table & !PCI_MSIX_TABLE_BIR).try_into().unwrap();
         self.msix_enabled = true;
     }
 
@@ -238,41 +205,6 @@ impl TestPciDev {
 
         let value = self.config_readw(addr + PCI_MSIX_MSG_CTL);
         (value & PCI_MSIX_MSG_CTL_TSIZE) + 1
-    }
-
-    pub fn init_notification(&self) {
-        let cap_exp_addr = self.find_capability(PCI_CAP_ID_EXP, 0);
-        let mut cmd = self.pci_bus.borrow().config_readw(
-            self.bus_num,
-            self.devfn,
-            cap_exp_addr + PCI_EXP_SLTCTL,
-        );
-        cmd |=
-            PCI_EXP_SLTCTL_ABPE | PCI_EXP_SLTCTL_PDCE | PCI_EXP_SLTCTL_CCIE | PCI_EXP_SLTCTL_HPIE;
-
-        self.pci_bus.borrow().config_writew(
-            self.bus_num,
-            self.devfn,
-            cap_exp_addr + PCI_EXP_SLTCTL,
-            cmd,
-        );
-    }
-
-    pub fn clear_slot_event(&self) {
-        let cap_exp_addr = self.find_capability(PCI_CAP_ID_EXP, 0);
-        let mut status = self.pci_bus.borrow().config_readw(
-            self.bus_num,
-            self.devfn,
-            cap_exp_addr + PCI_EXP_SLTSTA,
-        );
-
-        status &= PCI_EXP_SLTSTA_ABP | PCI_EXP_SLTSTA_PDC | PCI_EXP_SLTSTA_CC;
-        self.pci_bus.borrow().config_writew(
-            self.bus_num,
-            self.devfn,
-            cap_exp_addr + PCI_EXP_SLTSTA,
-            status,
-        );
     }
 
     pub fn io_readb(&self, bar_addr: PCIBarAddr, offset: u64) -> u8 {
@@ -326,11 +258,6 @@ impl TestPciDev {
         let value_buf = value.to_le_bytes().to_vec();
         let pci_bus = self.pci_bus.borrow_mut();
         pci_bus.memwrite((bar_addr + offset) as u32, &value_buf);
-    }
-
-    pub fn find_pci_device(&mut self, devfn: u8) -> bool {
-        self.devfn = devfn;
-        self.config_readw(PCI_VENDOR_ID) != 0xFFFF
     }
 
     pub fn io_map(&self, barnum: u8) -> u64 {
@@ -419,12 +346,12 @@ impl PciMsixOps for TestPciDev {
         self.io_writel(
             msix_table_bar,
             offset + PCI_MSIX_ENTRY_LOWER_ADDR,
-            msix_addr as u32,
+            msix_addr.try_into().unwrap(),
         );
         self.io_writel(
             msix_table_bar,
             offset + PCI_MSIX_ENTRY_UPPER_ADDR,
-            (msix_addr >> 32) as u32,
+            (msix_addr >> 32).try_into().unwrap(),
         );
         self.io_writel(msix_table_bar, offset + PCI_MSIX_ENTRY_DATA, msix_data);
 

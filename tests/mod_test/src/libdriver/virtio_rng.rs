@@ -10,13 +10,13 @@
 // NON-INFRINGEMENT, MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 // See the Mulan PSL v2 for more details.
 
-use std::cell::RefCell;
-use std::rc::Rc;
-
 use super::machine::TestStdMachine;
 use super::malloc::GuestAllocator;
 use super::virtio_pci_modern::TestVirtioPciDev;
-use crate::libtest::{test_init, TestState, MACHINE_TYPE_ARG};
+use crate::libtest::{test_init, TestState};
+
+use std::cell::RefCell;
+use std::rc::Rc;
 
 pub fn create_rng(
     random_file: String,
@@ -31,7 +31,7 @@ pub fn create_rng(
     let pci_fn: u8 = 0x0;
     let mut extra_args: Vec<&str> = Vec::new();
 
-    let mut args: Vec<&str> = MACHINE_TYPE_ARG.split(' ').collect();
+    let mut args: Vec<&str> = "-machine virt".split(' ').collect();
     extra_args.append(&mut args);
 
     let rng_pci_args = format!(

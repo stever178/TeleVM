@@ -10,14 +10,13 @@
 // NON-INFRINGEMENT, MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 // See the Mulan PSL v2 for more details.
 
+use super::malloc::GuestAllocator;
+use crate::libtest::TestState;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::mem::size_of;
 use std::rc::Rc;
 use std::time;
-
-use super::malloc::GuestAllocator;
-use crate::libtest::TestState;
 use util::byte_code::ByteCode;
 use util::num_ops::round_up;
 use util::offset_of;
@@ -50,7 +49,6 @@ pub trait VirtioDeviceOps {
     fn config_writew(&self, addr: u64, value: u16);
     fn config_writel(&self, addr: u64, value: u32);
     fn config_writeq(&self, addr: u64, value: u64);
-    fn isr_readb(&self) -> u8;
     fn enable_interrupt(&mut self);
     fn disable_interrupt(&mut self);
     fn get_device_features(&self) -> u64;
@@ -153,7 +151,7 @@ pub trait VirtioDeviceOps {
 #[derive(Default, Copy, Clone, Debug)]
 pub struct VringDesc {
     addr: u64,
-    pub len: u32,
+    len: u32,
     pub flags: u16,
     next: u16,
 }
@@ -166,7 +164,7 @@ pub static VRING_DESC_SIZE: u64 = size_of::<VringDesc>() as u64;
 pub struct VringAvail {
     flags: u16,
     idx: u16,
-    pub ring: Vec<u16>,
+    ring: Vec<u16>,
 }
 
 #[repr(C, packed(4))]
@@ -220,7 +218,7 @@ impl TestVringIndirectDesc {
         self.elem = elem;
         self.desc = alloc
             .borrow_mut()
-            .alloc((size_of::<VringDesc>() * elem as usize) as u64);
+            .alloc((size_of::<VringDesc>() * elem as usize).try_into().unwrap());
 
         for i in 0..elem - 1 {
             test_state
@@ -331,7 +329,7 @@ impl TestVirtQueue {
             test_state.borrow().writew(
                 self.desc
                     + (size_of::<VringDesc>() * i as usize + offset_of!(VringDesc, next)) as u64,
-                (i + 1) as u16,
+                (i + 1).try_into().unwrap(),
             );
         }
 
@@ -376,7 +374,7 @@ impl TestVirtQueue {
         let features = virtio_dev.get_guest_features();
         virtio_dev.queue_select(index);
 
-        let queue_size = virtio_dev.get_queue_size() as u32;
+        let queue_size = virtio_dev.get_queue_size().try_into().unwrap();
         assert!(queue_size != 0);
         assert!(queue_size & (queue_size - 1) == 0);
 
@@ -500,7 +498,7 @@ impl TestVirtQueue {
 
         let desc_elem = VringDesc {
             addr: data,
-            len,
+            len: len,
             flags,
             next: 0,
         };

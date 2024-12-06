@@ -13,6 +13,7 @@
 use std::cell::RefCell;
 use std::mem::size_of;
 use std::rc::Rc;
+use util::num_ops::round_up;
 
 use super::machine::TestStdMachine;
 use super::malloc::GuestAllocator;
@@ -22,11 +23,8 @@ use super::virtio_pci_modern::TestVirtioPciDev;
 use crate::libdriver::virtio::{
     TestVringDescEntry, VIRTIO_F_BAD_FEATURE, VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC,
 };
-use crate::libtest::{test_init, TestState, MACHINE_TYPE_ARG};
-use crate::utils::ImageType;
+use crate::libtest::{test_init, TestState};
 use crate::utils::{cleanup_img, create_img, TEST_IMAGE_SIZE};
-use util::byte_code::ByteCode;
-use util::num_ops::round_up;
 
 pub const VIRTIO_BLK_F_BARRIER: u64 = 0;
 pub const VIRTIO_BLK_F_SIZE_MAX: u64 = 1;
@@ -55,7 +53,7 @@ pub const VIRTIO_BLK_T_ILLGEAL: u32 = 32;
 pub const VIRTIO_BLK_S_OK: u8 = 0;
 /// IO error.
 pub const VIRTIO_BLK_S_IOERR: u8 = 1;
-/// Unsupported request.
+/// Unsupport request.
 pub const VIRTIO_BLK_S_UNSUPP: u8 = 2;
 
 pub const TIMEOUT_US: u64 = 15 * 1000 * 1000;
@@ -66,20 +64,12 @@ pub const REQ_STATUS_LEN: u32 = 1;
 pub const REQ_DATA_OFFSET: u64 = REQ_ADDR_LEN as u64;
 pub const REQ_STATUS_OFFSET: u64 = (REQ_ADDR_LEN + REQ_DATA_LEN) as u64;
 
-/// Used to compute the number of sectors.
-pub const SECTOR_SHIFT: u8 = 9;
-/// Max number sectors of per request.
-pub const MAX_REQUEST_SECTORS: u32 = u32::MAX >> SECTOR_SHIFT;
-
-#[repr(C)]
-#[derive(Default, Clone, Copy)]
+#[allow(unused)]
 pub struct VirtBlkDiscardWriteZeroes {
-    pub sector: u64,
-    pub num_sectors: u32,
-    pub flags: u32,
+    sector: u64,
+    num_sectors: u32,
+    flags: u32,
 }
-
-impl ByteCode for VirtBlkDiscardWriteZeroes {}
 
 #[allow(unused)]
 pub struct TestVirtBlkReq {
@@ -111,7 +101,6 @@ impl TestVirtBlkReq {
 }
 
 pub fn create_blk(
-    image_type: &ImageType,
     image_path: Rc<String>,
     device_args: Rc<String>,
     drive_args: Rc<String>,
@@ -124,12 +113,8 @@ pub fn create_blk(
     let pci_slot: u8 = 0x4;
     let pci_fn: u8 = 0x0;
     let mut extra_args: Vec<&str> = Vec::new();
-    let img_type = match image_type {
-        &ImageType::Raw => "raw",
-        &ImageType::Qcow2 => "qcow2",
-    };
 
-    let mut args: Vec<&str> = MACHINE_TYPE_ARG.split(' ').collect();
+    let mut args: Vec<&str> = "-machine virt".split(' ').collect();
     extra_args.append(&mut args);
 
     let blk_pci_args = format!(
@@ -139,8 +124,8 @@ pub fn create_blk(
     args = blk_pci_args[..].split(' ').collect();
     extra_args.append(&mut args);
     let blk_args = format!(
-        "-drive if=none,id=drive0,file={},format={}{}",
-        image_path, img_type, drive_args,
+        "-drive if=none,id=drive0,file={},format=raw{}",
+        image_path, drive_args,
     );
     args = blk_args.split(' ').collect();
     extra_args.append(&mut args);
@@ -176,16 +161,23 @@ pub fn virtio_blk_request(
         }
         VIRTIO_BLK_T_FLUSH => {}
         VIRTIO_BLK_T_GET_ID => {}
-        VIRTIO_BLK_T_DISCARD | VIRTIO_BLK_T_WRITE_ZEROES => {}
+        VIRTIO_BLK_T_DISCARD => {
+            assert_eq!(data_size % (REQ_DATA_LEN as usize), 0)
+        }
+        VIRTIO_BLK_T_WRITE_ZEROES => {
+            assert_eq!(data_size % size_of::<VirtBlkDiscardWriteZeroes>(), 0)
+        }
         VIRTIO_BLK_T_ILLGEAL => {}
         _ => {
             assert_eq!(data_size, 0)
         }
     }
 
-    let addr = alloc
-        .borrow_mut()
-        .alloc((size_of::<TestVirtBlkReq>() + data_size + 512) as u64);
+    let addr = alloc.borrow_mut().alloc(
+        (size_of::<TestVirtBlkReq>() + data_size + 512)
+            .try_into()
+            .unwrap(),
+    );
 
     let data_addr = if align {
         round_up(addr + REQ_ADDR_LEN as u64, 512).unwrap()
@@ -197,19 +189,9 @@ pub fn virtio_blk_request(
     test_state.borrow().memwrite(addr, req_bytes.as_slice());
     let mut data_bytes = req.data.as_bytes().to_vec();
     data_bytes.resize(data_size, 0);
-
-    // Write data to memory. If the data length is bigger than 4096, the memwrite()
-    // will return error. So, split it to 512 bytes.
-    let size = data_bytes.len();
-    let mut offset = 0;
-    while offset < size {
-        let len = std::cmp::min(512, size - offset);
-        test_state.borrow().memwrite(
-            data_addr + offset as u64,
-            &data_bytes.as_slice()[offset..offset + len],
-        );
-        offset += len;
-    }
+    test_state
+        .borrow()
+        .memwrite(data_addr, data_bytes.as_slice());
     test_state
         .borrow()
         .memwrite(data_addr + data_size as u64, &status.to_le_bytes());
@@ -359,67 +341,7 @@ pub fn virtio_blk_read(
     );
 }
 
-pub fn virtio_blk_read_write_zeroes(
-    blk: Rc<RefCell<TestVirtioPciDev>>,
-    test_state: Rc<RefCell<TestState>>,
-    alloc: Rc<RefCell<GuestAllocator>>,
-    vq: Rc<RefCell<TestVirtQueue>>,
-    req_type: u32,
-    sector: u64,
-    data_len: usize,
-) {
-    let mut read = true;
-    let mut blk_req = TestVirtBlkReq::new(req_type, 1, sector, data_len);
-    if req_type == VIRTIO_BLK_T_OUT {
-        unsafe {
-            blk_req.data.as_mut_vec().append(&mut vec![0; data_len]);
-        }
-        read = false;
-    }
-    let req_addr = virtio_blk_request(test_state.clone(), alloc.clone(), blk_req, false);
-    let data_addr = req_addr + REQ_ADDR_LEN as u64;
-    let data_entries: Vec<TestVringDescEntry> = vec![
-        TestVringDescEntry {
-            data: req_addr,
-            len: REQ_ADDR_LEN,
-            write: false,
-        },
-        TestVringDescEntry {
-            data: data_addr,
-            len: data_len as u32,
-            write: read,
-        },
-        TestVringDescEntry {
-            data: data_addr + data_len as u64,
-            len: REQ_STATUS_LEN,
-            write: true,
-        },
-    ];
-    let free_head = vq
-        .borrow_mut()
-        .add_chained(test_state.clone(), data_entries);
-    blk.borrow().kick_virtqueue(test_state.clone(), vq.clone());
-    blk.borrow().poll_used_elem(
-        test_state.clone(),
-        vq.clone(),
-        free_head,
-        TIMEOUT_US,
-        &mut None,
-        true,
-    );
-    let status_addr = req_addr + REQ_ADDR_LEN as u64 + data_len as u64;
-    let status = test_state.borrow().readb(status_addr);
-    assert_eq!(status, VIRTIO_BLK_S_OK);
-
-    if read {
-        assert_eq!(
-            test_state.borrow().memread(data_addr, data_len as u64),
-            vec![0; data_len],
-        );
-    }
-}
-
-pub fn virtio_blk_default_feature(blk: Rc<RefCell<TestVirtioPciDev>>) -> u64 {
+pub fn virtio_blk_defalut_feature(blk: Rc<RefCell<TestVirtioPciDev>>) -> u64 {
     let mut features = blk.borrow().get_device_features();
     features &= !(VIRTIO_F_BAD_FEATURE
         | 1 << VIRTIO_RING_F_INDIRECT_DESC
@@ -429,25 +351,18 @@ pub fn virtio_blk_default_feature(blk: Rc<RefCell<TestVirtioPciDev>>) -> u64 {
     features
 }
 
-pub fn set_up(
-    image_type: &ImageType,
-) -> (
+pub fn set_up() -> (
     Rc<RefCell<TestVirtioPciDev>>,
     Rc<RefCell<TestState>>,
     Rc<RefCell<GuestAllocator>>,
     Rc<String>,
 ) {
-    let image_path = Rc::new(create_img(TEST_IMAGE_SIZE, 0, image_type));
+    let image_path = Rc::new(create_img(TEST_IMAGE_SIZE, 0));
     let device_args = Rc::new(String::from(""));
     let drive_args = Rc::new(String::from(",direct=false"));
     let other_args = Rc::new(String::from(""));
-    let (blk, test_state, alloc) = create_blk(
-        image_type,
-        image_path.clone(),
-        device_args,
-        drive_args,
-        other_args,
-    );
+    let (blk, test_state, alloc) =
+        create_blk(image_path.clone(), device_args, drive_args, other_args);
 
     (blk, test_state, alloc, image_path)
 }

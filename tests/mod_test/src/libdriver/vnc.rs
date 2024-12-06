@@ -10,6 +10,12 @@
 // NON-INFRINGEMENT, MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 // See the Mulan PSL v2 for more details.
 
+use crate::{
+    libdriver::vnc::EncodingType::*,
+    libtest::{test_init, TestState},
+};
+use anyhow::{bail, Result};
+use core::time;
 use std::{
     cell::RefCell,
     cmp,
@@ -20,9 +26,6 @@ use std::{
     thread::sleep,
     time::Duration,
 };
-
-use anyhow::{bail, Result};
-use core::time;
 use vmm_sys_util::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
 
 use super::{
@@ -30,10 +33,6 @@ use super::{
     malloc::GuestAllocator,
     pci::{PCIBarAddr, TestPciDev, PCI_VENDOR_ID},
     pci_bus::TestPciBus,
-};
-use crate::{
-    libdriver::vnc::EncodingType::*,
-    libtest::{test_init, TestState, MACHINE_TYPE_ARG},
 };
 
 const EPOLL_DEFAULT_TIMEOUT: i32 = 1000;
@@ -370,7 +369,7 @@ pub enum RfbClientMessage {
 }
 
 pub struct TestPointEvent {
-    pub event_type: RfbClientMessage,
+    pub evnet_type: RfbClientMessage,
     pub button_mask: u8,
     pub x: u16,
     pub y: u16,
@@ -379,7 +378,7 @@ pub struct TestPointEvent {
 impl TestPointEvent {
     fn new(button_mask: u8, x: u16, y: u16) -> Self {
         Self {
-            event_type: RfbClientMessage::RfbPointerEvent,
+            evnet_type: RfbClientMessage::RfbPointerEvent,
             button_mask,
             x,
             y,
@@ -390,7 +389,7 @@ impl TestPointEvent {
 impl TestEventOperation for TestPointEvent {
     fn to_be_bytes(&self) -> Vec<u8> {
         let mut buf: Vec<u8> = Vec::new();
-        buf.append(&mut (self.event_type as u8).to_be_bytes().to_vec());
+        buf.append(&mut (self.evnet_type as u8).to_be_bytes().to_vec());
         buf.append(&mut self.button_mask.to_be_bytes().to_vec());
         buf.append(&mut self.x.to_be_bytes().to_vec());
         buf.append(&mut self.y.to_be_bytes().to_vec());
@@ -572,7 +571,7 @@ impl DisplayMode {
         buf.drain(..name_len as usize);
 
         println!(
-            "Display information set by server:\n \
+            "Display infomation set by server:\n \
             application name: {:?} Image size: width: {:?}, height: {:?}\n \
             big endian: {:?}, true color flag: {:?} red max {:?} red shift {:?}\n \
             green max {:?} green shift {:?} blue max {:?} blue shift {:?}\n",
@@ -785,7 +784,7 @@ impl VncClient {
         // Step 1: Exchange RFB Protocol: RFB 003.008.
         self.read_msg(&mut buf, 12)?;
         if "RFB 003.008\n".as_bytes().to_vec() != buf[..12].to_vec() {
-            bail!("Unsupported RFB version");
+            bail!("Unsupport RFB version");
         }
         self.write_msg(&"RFB 003.008\n".as_bytes().to_vec())?;
         buf.drain(..12);
@@ -797,15 +796,14 @@ impl VncClient {
         buf.drain(..1);
         self.read_msg(&mut buf, auth_num as usize)?;
         if sec_type as u8 != buf[0] {
-            bail!("Unsupported security type!");
+            bail!("Unsupport security type!");
         }
         buf.drain(..auth_num as usize);
         self.write_msg(&(sec_type as u8).to_be_bytes().to_vec())?;
 
         match sec_type {
             TestAuthType::VncAuthNone => {
-                // Step 3. Handle_auth: Authstate::No, Server accept auth and client send share
-                // mode.
+                // Step 3. Handle_auth: Authstate::No, Server accept auth and client send share mode.
                 self.read_msg(&mut buf, 4)?;
                 if buf[..4].to_vec() != [0_u8; 4].to_vec() {
                     bail!("Reject by vnc server");
@@ -826,9 +824,9 @@ impl VncClient {
     }
 
     /// Send point event to VncServer.
-    pub fn test_point_event(&mut self, button_mask: u8, x: u16, y: u16) -> Result<()> {
+    pub fn test_point_event(&mut self, buttom_mask: u8, x: u16, y: u16) -> Result<()> {
         println!("Test point event.");
-        let test_event = TestPointEvent::new(button_mask, x, y);
+        let test_event = TestPointEvent::new(buttom_mask, x, y);
         self.write_msg(&mut test_event.to_be_bytes())?;
         Ok(())
     }
@@ -898,7 +896,7 @@ impl VncClient {
 
     /// Send client cut event to VncServer.
     pub fn test_send_client_cut(&mut self, client_cut: TestClientCut) -> Result<()> {
-        println!("Test send client cut event.");
+        println!("Test send client cut evnet.");
         self.write_msg(&mut client_cut.to_be_bytes())?;
         Ok(())
     }
@@ -1003,7 +1001,7 @@ impl VncClient {
             _ => {
                 assert!(
                     false,
-                    "unsupported event type from client: {}",
+                    "unsupport event type from client: {}",
                     frame_buff.enc
                 );
             }
@@ -1140,7 +1138,7 @@ impl TestDemoGpuDevice {
     }
 
     /// Replace the surface of the display.
-    /// The width and height corresponding the width and height of the surface.
+    /// The width and height corresponding the width and height of the suface.
     pub fn replace_surface(&mut self, width: u32, height: u32, pixman_format: u32) {
         let cmd = TestGpuCmd {
             event_type: GpuEvent::ReplaceSurface,
@@ -1324,7 +1322,8 @@ pub fn set_up(
 ) {
     let mut args: Vec<String> = Vec::new();
     // vm args.
-    let vm_args: Vec<&str> = MACHINE_TYPE_ARG.split(' ').collect();
+    let vm_args = String::from("-machine virt");
+    let vm_args: Vec<&str> = vm_args[..].split(' ').collect();
     let mut vm_args = vm_args.into_iter().map(|s| s.to_string()).collect();
     args.append(&mut vm_args);
     // Log.

@@ -10,17 +10,17 @@
 // NON-INFRINGEMENT, MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 // See the Mulan PSL v2 for more details.
 
-use std::{cell::RefCell, mem::size_of, rc::Rc, slice::from_raw_parts, vec};
-
 use super::{
     machine::TestStdMachine,
     malloc::GuestAllocator,
-    pci::{PCIBarAddr, TestPciDev},
+    pci::{PCIBarAddr, TestPciDev, PCI_VENDOR_ID},
     pci_bus::TestPciBus,
 };
 use crate::libdriver::virtio::{TestVirtQueue, TestVringDescEntry, VirtioDeviceOps};
 use crate::libdriver::virtio_pci_modern::TestVirtioPciDev;
-use crate::libtest::{test_init, TestState, MACHINE_TYPE_ARG};
+use crate::libtest::{test_init, TestState};
+
+use std::{cell::RefCell, mem::size_of, rc::Rc, slice::from_raw_parts, vec};
 use util::byte_code::ByteCode;
 use virtio::{
     VIRTIO_GPU_CMD_GET_DISPLAY_INFO, VIRTIO_GPU_CMD_GET_EDID,
@@ -68,7 +68,6 @@ impl VirtioGpuRect {
 
 impl ByteCode for VirtioGpuRect {}
 
-#[repr(C)]
 #[derive(Default, Clone, Copy)]
 pub struct VirtioGpuDisplayOne {
     pub rect: VirtioGpuRect,
@@ -78,7 +77,6 @@ pub struct VirtioGpuDisplayOne {
 
 impl ByteCode for VirtioGpuDisplayOne {}
 
-#[repr(C)]
 #[allow(unused)]
 #[derive(Default, Clone, Copy)]
 pub struct VirtioGpuDisplayInfo {
@@ -105,7 +103,6 @@ impl VirtioGpuGetEdid {
 
 impl ByteCode for VirtioGpuGetEdid {}
 
-#[repr(C)]
 #[allow(unused)]
 #[derive(Clone, Copy)]
 pub struct VirtioGpuRespEdid {
@@ -357,12 +354,12 @@ impl TestDemoDpyDevice {
         return test_state.borrow_mut().readw(addr);
     }
 
-    pub fn query_cursor(&mut self) -> u32 {
+    pub fn query_cursor(&mut self) -> u16 {
         let addr = self.allocator.borrow_mut().alloc(size_of::<u16>() as u64);
         let test_state = self.pci_dev.pci_bus.borrow_mut().test_state.clone();
         self.pci_dev
             .io_writeq(self.bar_addr, DpyEvent::QueryCursor as u64, addr);
-        return test_state.borrow_mut().readl(addr);
+        return test_state.borrow_mut().readw(addr);
     }
 
     pub fn get_surface(&mut self, size: u64) -> Vec<u8> {
@@ -381,9 +378,21 @@ impl TestDemoDpyDevice {
         return test_state.borrow_mut().memread(addr, size);
     }
 
+    pub fn set_devfn(&mut self, devfn: u8) {
+        self.pci_dev.devfn = devfn;
+    }
+
+    pub fn find_pci_device(&mut self, devfn: u8) -> bool {
+        self.set_devfn(devfn);
+        if self.pci_dev.config_readw(PCI_VENDOR_ID) == 0xFFFF {
+            return false;
+        }
+        true
+    }
+
     pub fn init(&mut self, pci_slot: u8) {
         let devfn = pci_slot << 3;
-        assert!(self.pci_dev.find_pci_device(devfn));
+        assert!(self.find_pci_device(devfn));
 
         self.pci_dev.enable();
         self.bar_addr = self.pci_dev.io_map(self.bar_idx);
@@ -399,7 +408,7 @@ impl TestVirtioGpu {
         Self {
             device: Rc::new(RefCell::new(TestVirtioPciDev::new(pci_bus))),
             allocator,
-            state,
+            state: state,
             ctrl_q: Rc::new(RefCell::new(TestVirtQueue::new())),
             cursor_q: Rc::new(RefCell::new(TestVirtQueue::new())),
         }
@@ -436,14 +445,13 @@ impl TestVirtioGpu {
         self.device.borrow_mut().set_driver_ok();
     }
 
-    pub fn submit_request<T: ByteCode>(
+    pub fn request_complete<T: ByteCode>(
         &mut self,
         ctrl_q: bool,
         hdr: &[u8],
         hdr_ctx: Option<&[u8]>,
         ctx: Option<&[u8]>,
         resp: Option<&mut T>,
-        wait_resp: bool,
     ) {
         let mut offset = 0;
         let mut vec = Vec::new();
@@ -520,16 +528,14 @@ impl TestVirtioGpu {
                 .borrow_mut()
                 .kick_virtqueue(self.state.clone(), self.ctrl_q.clone());
 
-            if wait_resp {
-                self.device.borrow_mut().poll_used_elem(
-                    self.state.clone(),
-                    self.ctrl_q.clone(),
-                    free_head,
-                    TIMEOUT_US,
-                    &mut None,
-                    true,
-                );
-            }
+            self.device.borrow_mut().poll_used_elem(
+                self.state.clone(),
+                self.ctrl_q.clone(),
+                free_head,
+                TIMEOUT_US,
+                &mut None,
+                true,
+            );
         } else {
             let free_head = self
                 .cursor_q
@@ -540,16 +546,14 @@ impl TestVirtioGpu {
                 .borrow_mut()
                 .kick_virtqueue(self.state.clone(), self.cursor_q.clone());
 
-            if wait_resp {
-                self.device.borrow_mut().poll_used_elem(
-                    self.state.clone(),
-                    self.cursor_q.clone(),
-                    free_head,
-                    TIMEOUT_US,
-                    &mut None,
-                    true,
-                );
-            }
+            self.device.borrow_mut().poll_used_elem(
+                self.state.clone(),
+                self.cursor_q.clone(),
+                free_head,
+                TIMEOUT_US,
+                &mut None,
+                true,
+            );
         }
 
         if resp.is_some() {
@@ -563,17 +567,6 @@ impl TestVirtioGpu {
 
             *resp.unwrap() = slice[0].clone();
         }
-    }
-
-    pub fn request_complete<T: ByteCode>(
-        &mut self,
-        ctrl_q: bool,
-        hdr: &[u8],
-        hdr_ctx: Option<&[u8]>,
-        ctx: Option<&[u8]>,
-        resp: Option<&mut T>,
-    ) {
-        self.submit_request(ctrl_q, hdr, hdr_ctx, ctx, resp, true);
     }
 }
 
@@ -610,7 +603,8 @@ pub fn set_up(
 
     let mut args: Vec<String> = Vec::new();
     // vm args
-    let vm_args: Vec<&str> = MACHINE_TYPE_ARG.split(' ').collect();
+    let vm_args = String::from("-machine virt");
+    let vm_args: Vec<&str> = vm_args[..].split(' ').collect();
     let mut vm_args = vm_args.into_iter().map(|s| s.to_string()).collect();
     args.append(&mut vm_args);
     // log args

@@ -10,14 +10,11 @@
 // NON-INFRINGEMENT, MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 // See the Mulan PSL v2 for more details.
 
+use rand::distributions::Alphanumeric;
+use rand::{thread_rng, Rng};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-
-use rand::distributions::Alphanumeric;
-use rand::{thread_rng, Rng};
-
-use crate::libdriver::qcow2::create_qcow2_img;
 
 pub fn get_rand_str(size: usize) -> String {
     thread_rng()
@@ -71,39 +68,19 @@ pub fn swap_u64(value: u64) -> u64 {
     lower_u32 << 32 | higher_u32
 }
 
-pub const TEST_IMAGE_BITS: u64 = 26;
-pub const TEST_IMAGE_SIZE: u64 = 1 << TEST_IMAGE_BITS;
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum ImageType {
-    Raw,
-    Qcow2,
-}
-
-impl ImageType {
-    pub const IMAGE_TYPE: [Self; 2] = [ImageType::Raw, ImageType::Qcow2];
-}
-
+pub const TEST_IMAGE_SIZE: u64 = 64 * 1024 * 1024;
 /// Create image file.
-pub fn create_img(image_size: u64, flag: u8, image_type: &ImageType) -> String {
+pub fn create_img(size: u64, flag: u8) -> String {
     let rng_name: String = get_rand_str(8);
 
     assert!(cfg!(target_os = "linux"));
 
-    let mut image_path = format!("/tmp/stratovirt-{}.img", rng_name);
+    // name of image changed 'stratovirt' -> 'televm'
+    let mut image_path = format!("/tmp/televm-{}.img", rng_name);
     if flag == 1 {
-        image_path = format!("/var/log/stratovirt-{}.img", rng_name);
+        image_path = format!("/var/log/televm-{}.img", rng_name);
     }
 
-    match image_type {
-        &ImageType::Raw => create_raw_img(image_path.clone(), image_size),
-        &ImageType::Qcow2 => create_qcow2_img(image_path.clone(), image_size),
-    }
-
-    image_path
-}
-
-fn create_raw_img(image_path: String, size: u64) {
     let image_path_of = format!("of={}", &image_path);
     let image_size_of = format!("bs={}", size);
     let output = Command::new("dd")
@@ -114,6 +91,7 @@ fn create_raw_img(image_path: String, size: u64) {
         .output()
         .expect("failed to create image");
     assert!(output.status.success());
+    image_path
 }
 
 /// Delete image file.

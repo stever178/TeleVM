@@ -10,21 +10,19 @@
 // NON-INFRINGEMENT, MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 // See the Mulan PSL v2 for more details.
 
-use std::cell::RefCell;
-use std::fs::{remove_file, File};
-use std::io::{self, BufRead, BufReader};
-use std::process::Command;
-use std::rc::Rc;
-use std::{thread, time};
-
-use serde_json::json;
-
 use mod_test::libdriver::machine::TestStdMachine;
 use mod_test::libdriver::malloc::GuestAllocator;
 use mod_test::libdriver::virtio::{TestVirtQueue, TestVringDescEntry, VirtioDeviceOps};
 use mod_test::libdriver::virtio_pci_modern::{TestVirtioPciDev, VirtioPciCommonCfg};
-use mod_test::libtest::{test_init, TestState, MACHINE_TYPE_ARG};
-use util::{byte_code::ByteCode, offset_of};
+use mod_test::libtest::{test_init, TestState};
+use serde_json::json;
+use std::cell::RefCell;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader};
+use std::process::Command;
+use std::rc::Rc;
+use std::{thread, time};
+use util::offset_of;
 
 const BALLOON_F_DEFLATE_ON_OOM_TEST: u32 = 2;
 const BALLOON_F_PRPORTING_TEST: u32 = 5;
@@ -32,9 +30,6 @@ const BALLOON_F_VERSION1_TEST: u64 = 32;
 const PAGE_SIZE_UNIT: u64 = 4096;
 const TIMEOUT_US: u64 = 15 * 1000 * 1000;
 const MBSIZE: u64 = 1024 * 1024;
-const MEM_BUFFER_PERCENT_DEFAULT: u32 = 50;
-const MONITOR_INTERVAL_SECOND_DEFAULT: u32 = 10;
-const ADDRESS_BASE: u64 = 0x4000_0000;
 
 fn read_lines(filename: String) -> io::Lines<BufReader<File>> {
     let file = File::open(filename).unwrap();
@@ -68,35 +63,21 @@ pub struct VirtioBalloonTest {
     pub inf_queue: Rc<RefCell<TestVirtQueue>>,
     pub def_queue: Rc<RefCell<TestVirtQueue>>,
     pub fpr_queue: Option<Rc<RefCell<TestVirtQueue>>>,
-    pub auto_queue: Option<Rc<RefCell<TestVirtQueue>>>,
-}
-
-pub struct BalloonTestCfg {
-    pub fpr: bool,
-    pub auto_balloon: bool,
-    pub percent: u32,
-    pub interval: u32,
 }
 
 impl VirtioBalloonTest {
-    pub fn new(
-        memsize: u64,
-        page_size: u64,
-        shared: bool,
-        huge: bool,
-        cfg: BalloonTestCfg,
-    ) -> Self {
+    pub fn new(memsize: u64, page_size: u64, shared: bool, fpr: bool, huge: bool) -> Self {
         let pci_slot: u8 = 0x4;
         let mut extra_args: Vec<&str> = Vec::new();
         let mut fpr_switch = String::from("false");
-        let mut auto_switch = String::from("false");
         let mem_path = format!("-mem-path /tmp/stratovirt/hugepages");
 
-        let mut machine_args = MACHINE_TYPE_ARG.to_string();
+        let mut args: Vec<&str> = "-machine".split(' ').collect();
         if shared {
-            machine_args.push_str(",mem-share=on");
+            args.push("virt,mem-share=on");
+        } else {
+            args.push("virt");
         }
-        let mut args: Vec<&str> = machine_args.split(' ').collect();
         extra_args.append(&mut args);
 
         let mem_args = format!("-m {}", memsize);
@@ -108,15 +89,12 @@ impl VirtioBalloonTest {
             extra_args.append(&mut args);
         }
 
-        if cfg.fpr {
+        if fpr {
             fpr_switch = String::from("true");
         }
-        if cfg.auto_balloon {
-            auto_switch = String::from("true");
-        }
         let dev_args = format!(
-            "-device virtio-balloon-pci,id=drv0,bus=pcie.0,addr={}.0,free-page-reporting={},auto-balloon={},membuf-percent={},monitor-interval={}",
-            pci_slot, fpr_switch, auto_switch, cfg.percent, cfg.interval
+            "-device {},id=drv0,bus=pcie.0,addr={}.0,free-page-reporting={}",
+            "virtio-balloon-pci", pci_slot, fpr_switch
         );
         args = dev_args[..].split(' ').collect();
         extra_args.append(&mut args);
@@ -132,26 +110,19 @@ impl VirtioBalloonTest {
         let inf_queue;
         let def_queue;
         let mut fpr_queue = None;
-        let mut auto_queue = None;
-        let mut que_num = 2_usize;
-        let mut idx = 2_usize;
-        if cfg.fpr {
-            que_num += 1;
-        }
-        if cfg.auto_balloon {
-            que_num += 1;
-        }
-        let ques =
-            dev.borrow_mut()
-                .init_device(test_state.clone(), allocator.clone(), features, que_num);
-        inf_queue = ques[0].clone();
-        def_queue = ques[1].clone();
-        if cfg.fpr {
-            fpr_queue = Some(ques[idx].clone());
-            idx += 1;
-        }
-        if cfg.auto_balloon {
-            auto_queue = Some(ques[idx].clone());
+        if fpr {
+            let ques =
+                dev.borrow_mut()
+                    .init_device(test_state.clone(), allocator.clone(), features, 3);
+            inf_queue = ques[0].clone();
+            def_queue = ques[1].clone();
+            fpr_queue = Some(ques[2].clone());
+        } else {
+            let ques =
+                dev.borrow_mut()
+                    .init_device(test_state.clone(), allocator.clone(), features, 2);
+            inf_queue = ques[0].clone();
+            def_queue = ques[1].clone();
         }
 
         VirtioBalloonTest {
@@ -161,74 +132,6 @@ impl VirtioBalloonTest {
             inf_queue,
             def_queue,
             fpr_queue,
-            auto_queue,
-        }
-    }
-
-    pub fn numa_node_new() -> Self {
-        let mut args: Vec<&str> = Vec::new();
-        let mut extra_args: Vec<&str> = MACHINE_TYPE_ARG.split(' ').collect();
-        args.append(&mut extra_args);
-
-        let cpu = 8;
-        let cpu_args = format!(
-            "-smp {},sockets=1,cores=4,threads=2 -cpu host,pmu=on -m 2G",
-            cpu
-        );
-        let mut extra_args = cpu_args.split(' ').collect();
-        args.append(&mut extra_args);
-        extra_args = "-object memory-backend-file,size=1G,id=mem0,host-nodes=0-1,policy=bind,share=on,mem-path=test.fd"
-            .split(' ')
-            .collect();
-        args.append(&mut extra_args);
-        extra_args =
-            "-object memory-backend-memfd,size=1G,id=mem1,host-nodes=0-1,policy=bind,mem-prealloc=true"
-                .split(' ')
-                .collect();
-        args.append(&mut extra_args);
-        extra_args = "-numa node,nodeid=0,cpus=0-3,memdev=mem0"
-            .split(' ')
-            .collect();
-        args.append(&mut extra_args);
-        extra_args = "-numa node,nodeid=1,cpus=4-7,memdev=mem1"
-            .split(' ')
-            .collect();
-        args.append(&mut extra_args);
-        extra_args = "-numa dist,src=0,dst=1,val=30".split(' ').collect();
-        args.append(&mut extra_args);
-        extra_args = "-numa dist,src=1,dst=0,val=30".split(' ').collect();
-        args.append(&mut extra_args);
-
-        extra_args = "-device virtio-balloon-pci,id=drv0,bus=pcie.0,addr=0x4.0"
-            .split(' ')
-            .collect();
-        args.append(&mut extra_args);
-
-        let test_state = Rc::new(RefCell::new(test_init(args)));
-        let machine = TestStdMachine::new_bymem(test_state.clone(), 2 * MBSIZE, 4096);
-        let allocator = machine.allocator.clone();
-
-        let dev = Rc::new(RefCell::new(TestVirtioPciDev::new(machine.pci_bus.clone())));
-        dev.borrow_mut().init(4, 0);
-
-        let features = dev.borrow_mut().get_device_features();
-        let inf_queue;
-        let def_queue;
-
-        let ques = dev
-            .borrow_mut()
-            .init_device(test_state.clone(), allocator.clone(), features, 2);
-        inf_queue = ques[0].clone();
-        def_queue = ques[1].clone();
-
-        VirtioBalloonTest {
-            device: dev,
-            state: test_state,
-            allocator,
-            inf_queue,
-            def_queue,
-            fpr_queue: None,
-            auto_queue: None,
         }
     }
 }
@@ -236,13 +139,7 @@ impl VirtioBalloonTest {
 fn inflate_fun(shared: bool) {
     let page_num = 255_i32;
     let mut idx = 0_i32;
-    let cfg = BalloonTestCfg {
-        fpr: false,
-        auto_balloon: false,
-        percent: 0,
-        interval: 0,
-    };
-    let balloon = VirtioBalloonTest::new(1024, PAGE_SIZE_UNIT, shared, false, cfg);
+    let balloon = VirtioBalloonTest::new(1024, PAGE_SIZE_UNIT, shared, false, false);
 
     let free_page = balloon
         .allocator
@@ -315,13 +212,7 @@ fn inflate_fun(shared: bool) {
 fn balloon_fun(shared: bool, huge: bool) {
     let page_num = 255_u32;
     let mut idx = 0_u32;
-    let cfg = BalloonTestCfg {
-        fpr: false,
-        auto_balloon: false,
-        percent: 0,
-        interval: 0,
-    };
-    let balloon = VirtioBalloonTest::new(1024, PAGE_SIZE_UNIT, shared, huge, cfg);
+    let balloon = VirtioBalloonTest::new(1024, PAGE_SIZE_UNIT, shared, false, huge);
 
     let free_page = balloon
         .allocator
@@ -544,14 +435,14 @@ fn balloon_huge_fun_001() {
 ///     2.set guest feature 0xFFFFFFFFFFFFFFFF
 /// Expect:
 ///     1.Success
-///     2.guest feature equal device feature
+///     2.guest feature equel device feature
 #[test]
 fn balloon_feature_001() {
     let pci_slot: u8 = 0x4;
     let pci_fn: u8 = 0x0;
     let mut extra_args: Vec<&str> = Vec::new();
 
-    let mut args: Vec<&str> = MACHINE_TYPE_ARG.split(' ').collect();
+    let mut args: Vec<&str> = "-machine virt".split(' ').collect();
     extra_args.append(&mut args);
 
     let mem_args = format!("-m {}", 128);
@@ -598,7 +489,7 @@ fn balloon_feature_002() {
     let pci_fn: u8 = 0x0;
     let mut extra_args: Vec<&str> = Vec::new();
 
-    let mut args: Vec<&str> = MACHINE_TYPE_ARG.split(' ').collect();
+    let mut args: Vec<&str> = "-machine virt".split(' ').collect();
     extra_args.append(&mut args);
 
     let mem_args = format!("-m {}", 128);
@@ -643,13 +534,7 @@ fn balloon_feature_002() {
 fn balloon_fpr_fun(shared: bool) {
     let page_num = 255_u32;
     let mut idx = 0_u32;
-    let cfg = BalloonTestCfg {
-        fpr: true,
-        auto_balloon: false,
-        percent: 0,
-        interval: 0,
-    };
-    let balloon = VirtioBalloonTest::new(1024, PAGE_SIZE_UNIT, shared, false, cfg);
+    let balloon = VirtioBalloonTest::new(1024, PAGE_SIZE_UNIT, shared, true, false);
 
     let free_page = balloon
         .allocator
@@ -750,27 +635,11 @@ struct VirtioBalloonConfig {
     pub num_pages: u32,
     /// Number of pages we've actually got in balloon device.
     pub actual: u32,
-    pub _reserved: u32,
-    pub _reserved1: u32,
-    /// Buffer percent is a percentage of memory actually needed by
-    /// the applications and services running inside the virtual machine.
-    /// This parameter takes effect only when VIRTIO_BALLOON_F_MESSAGE_VQ is supported.
-    /// Recommended value range: [20, 80] and default is 50.
-    pub membuf_percent: u32,
-    /// Monitor interval host wants to adjust VM memory size.
-    /// Recommended value range: [5, 300] and default is 10.
-    pub monitor_interval: u32,
 }
 
 #[test]
 fn query() {
-    let cfg = BalloonTestCfg {
-        fpr: false,
-        auto_balloon: false,
-        percent: 0,
-        interval: 0,
-    };
-    let balloon = VirtioBalloonTest::new(2048, PAGE_SIZE_UNIT, false, false, cfg);
+    let balloon = VirtioBalloonTest::new(2048, PAGE_SIZE_UNIT, false, false, false);
     let ret = balloon
         .state
         .borrow_mut()
@@ -793,13 +662,7 @@ fn query() {
 ///     1/2/3.Success
 #[test]
 fn balloon_config_001() {
-    let cfg = BalloonTestCfg {
-        fpr: false,
-        auto_balloon: false,
-        percent: 0,
-        interval: 0,
-    };
-    let balloon = VirtioBalloonTest::new(1024, PAGE_SIZE_UNIT, false, false, cfg);
+    let balloon = VirtioBalloonTest::new(1024, PAGE_SIZE_UNIT, false, false, false);
 
     balloon
         .state
@@ -864,13 +727,7 @@ fn balloon_config_002() {
     if size_kb < 1024 * 1024 {
         return;
     }
-    let cfg = BalloonTestCfg {
-        fpr: false,
-        auto_balloon: false,
-        percent: 0,
-        interval: 0,
-    };
-    let balloon = VirtioBalloonTest::new(1024, PAGE_SIZE_UNIT, false, true, cfg);
+    let balloon = VirtioBalloonTest::new(1024, PAGE_SIZE_UNIT, false, false, true);
 
     balloon
         .state
@@ -930,13 +787,7 @@ fn balloon_config_002() {
 ///     1/2.Success
 #[test]
 fn balloon_deactive_001() {
-    let cfg = BalloonTestCfg {
-        fpr: false,
-        auto_balloon: false,
-        percent: 0,
-        interval: 0,
-    };
-    let balloon = VirtioBalloonTest::new(1024, PAGE_SIZE_UNIT, false, false, cfg);
+    let balloon = VirtioBalloonTest::new(1024, PAGE_SIZE_UNIT, false, false, false);
 
     let bar = balloon.device.borrow().bar;
     let common_base = balloon.device.borrow().common_base as u64;
@@ -959,179 +810,4 @@ fn balloon_deactive_001() {
         json!({"actual": 1073741824 as u64})
     );
     balloon.state.borrow_mut().stop();
-}
-
-#[derive(Clone, Copy, Default)]
-#[repr(packed(1))]
-struct BalloonStat {
-    _tag: u16,
-    _val: u64,
-}
-impl ByteCode for BalloonStat {}
-/// balloon device deactive config test
-/// TestStep:
-///     1.Init device
-///     2.geust send msg to host by auto balloon
-/// Expect:
-///     1/2.Success
-#[test]
-fn auto_balloon_test_001() {
-    let cfg = BalloonTestCfg {
-        fpr: false,
-        auto_balloon: true,
-        percent: MEM_BUFFER_PERCENT_DEFAULT,
-        interval: MONITOR_INTERVAL_SECOND_DEFAULT,
-    };
-    let balloon = VirtioBalloonTest::new(1024, PAGE_SIZE_UNIT, false, false, cfg);
-
-    let num_pages = balloon
-        .device
-        .borrow_mut()
-        .config_readl(offset_of!(VirtioBalloonConfig, num_pages) as u64);
-    assert_eq!(num_pages, 0);
-    let percent = balloon
-        .device
-        .borrow_mut()
-        .config_readl(offset_of!(VirtioBalloonConfig, membuf_percent) as u64);
-    assert_eq!(percent, MEM_BUFFER_PERCENT_DEFAULT);
-    let interval = balloon
-        .device
-        .borrow_mut()
-        .config_readl(offset_of!(VirtioBalloonConfig, monitor_interval) as u64);
-    assert_eq!(interval, MONITOR_INTERVAL_SECOND_DEFAULT);
-
-    let stat = BalloonStat {
-        _tag: 0,
-        _val: 131070,
-    };
-    let msg_addr = balloon.allocator.borrow_mut().alloc(PAGE_SIZE_UNIT);
-    balloon
-        .state
-        .borrow_mut()
-        .memwrite(msg_addr, &stat.as_bytes());
-
-    let auto_queue = balloon.auto_queue.unwrap();
-
-    let free_head = auto_queue.borrow_mut().add(
-        balloon.state.clone(),
-        msg_addr,
-        std::mem::size_of::<BalloonStat>() as u32,
-        false,
-    );
-    balloon
-        .device
-        .borrow_mut()
-        .kick_virtqueue(balloon.state.clone(), auto_queue.clone());
-    balloon.device.borrow_mut().poll_used_elem(
-        balloon.state.clone(),
-        auto_queue.clone(),
-        free_head,
-        TIMEOUT_US,
-        &mut None,
-        false,
-    );
-    let num_pages = balloon
-        .device
-        .borrow_mut()
-        .config_readl(offset_of!(VirtioBalloonConfig, num_pages) as u64);
-    assert_eq!(num_pages, 131070);
-    balloon
-        .device
-        .borrow_mut()
-        .config_writel(offset_of!(VirtioBalloonConfig, actual) as u64, 131070);
-    let actual = balloon
-        .device
-        .borrow_mut()
-        .config_readl(offset_of!(VirtioBalloonConfig, actual) as u64);
-    assert_eq!(actual, 131070);
-}
-
-#[test]
-/// balloon device deactive config test
-/// TestStep:
-///     1.Init device
-///     2.geust send msg to host by auto balloon
-/// Expect:
-///     1/2.Success
-fn balloon_numa1() {
-    let page_num = 255_u32;
-    let mut idx = 0_u32;
-    let balloon = VirtioBalloonTest::numa_node_new();
-
-    let free_page = 0x4000_0000 + ADDRESS_BASE - 100 * PAGE_SIZE_UNIT;
-    let pfn = (free_page >> 12) as u32;
-    let pfn_addr = balloon.allocator.borrow_mut().alloc(PAGE_SIZE_UNIT);
-    while idx < page_num {
-        balloon
-            .state
-            .borrow_mut()
-            .writel(pfn_addr + 4 * idx as u64, pfn + idx);
-        balloon
-            .state
-            .borrow_mut()
-            .writeb(free_page + PAGE_SIZE_UNIT * idx as u64, 1);
-        idx += 1;
-    }
-
-    // begin inflate addresses
-    let mut loop_num = 0_u32;
-    let mut msg = Vec::new();
-
-    while loop_num < page_num {
-        let entry = TestVringDescEntry {
-            data: pfn_addr + (loop_num as u64 * 4),
-            len: 4,
-            write: false,
-        };
-        msg.push(entry);
-        loop_num += 1;
-    }
-    let free_head = balloon
-        .inf_queue
-        .borrow_mut()
-        .add_chained(balloon.state.clone(), msg);
-    balloon
-        .device
-        .borrow_mut()
-        .kick_virtqueue(balloon.state.clone(), balloon.inf_queue.clone());
-    balloon.device.borrow_mut().poll_used_elem(
-        balloon.state.clone(),
-        balloon.inf_queue.clone(),
-        free_head,
-        TIMEOUT_US,
-        &mut None,
-        false,
-    );
-    // begin deflate addresses
-    let mut loop_num = 0_u32;
-    let mut msg = Vec::new();
-
-    while loop_num < page_num {
-        let entry = TestVringDescEntry {
-            data: pfn_addr + (loop_num as u64 * 4),
-            len: 4,
-            write: false,
-        };
-        msg.push(entry);
-        loop_num += 1;
-    }
-    let free_head = balloon
-        .def_queue
-        .borrow_mut()
-        .add_chained(balloon.state.clone(), msg);
-    balloon
-        .device
-        .borrow_mut()
-        .kick_virtqueue(balloon.state.clone(), balloon.def_queue.clone());
-    balloon.device.borrow_mut().poll_used_elem(
-        balloon.state.clone(),
-        balloon.def_queue.clone(),
-        free_head,
-        TIMEOUT_US,
-        &mut None,
-        false,
-    );
-
-    balloon.state.borrow_mut().stop();
-    remove_file("test.fd").unwrap();
 }
