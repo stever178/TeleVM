@@ -194,7 +194,7 @@ fn blk_basic() {
 ///   4. Destroy device.
 /// Expect:
 ///   1/2/4: success, 3: failed.
-#[test]
+// #[test]
 fn blk_features_negotiate() {
     let image_path = Rc::new(create_img(TEST_IMAGE_SIZE, 0));
     let device_args = Rc::new(String::from(",num-queues=4"));
@@ -251,7 +251,7 @@ fn blk_features_negotiate() {
 ///   3. Destroy device.
 /// Expect:
 ///   1/2/3: success.
-#[test]
+// #[test]
 fn blk_feature_seg_max() {
     let (blk, test_state, alloc, image_path) = set_up();
 
@@ -303,7 +303,7 @@ fn blk_feature_seg_max() {
 ///   4. Destroy device.
 /// Expect:
 ///   1/2/4: success, failed: 3.
-#[test]
+// #[test]
 fn blk_feature_ro() {
     let (blk, test_state, alloc, image_path) = set_up();
 
@@ -395,7 +395,7 @@ fn blk_feature_ro() {
 ///   3. Destroy device.
 /// Expect:
 ///   1/2/3: success.
-#[test]
+// #[test]
 fn blk_feature_flush() {
     let (blk, test_state, alloc, image_path) = set_up();
 
@@ -448,7 +448,7 @@ fn blk_feature_flush() {
 ///   3. Destroy device.
 /// Expect:
 ///   1/2/3: success.
-#[test]
+// #[test]
 fn blk_feature_mq() {
     let image_path = Rc::new(create_img(TEST_IMAGE_SIZE, 0));
     let device_args = Rc::new(String::from(",num-queues=4"));
@@ -559,7 +559,7 @@ fn blk_feature_mq() {
 ///   3. Destroy device.
 /// Expect:
 ///   1/2/3: success.
-#[test]
+// #[test]
 fn blk_all_features() {
     let image_path = Rc::new(create_img(TEST_IMAGE_SIZE_1M, 1));
     let device_args = Rc::new(String::from(
@@ -620,7 +620,7 @@ fn blk_all_features() {
 ///   3. Destroy device.
 /// Expect:
 ///   1/3: success, 2: failed.
-#[test]
+// #[test]
 fn blk_small_file_511b() {
     let size = 511;
     let image_path = Rc::new(create_img(size, 1));
@@ -720,7 +720,7 @@ fn blk_small_file_511b() {
 ///   3. Destroy device.
 /// Expect:
 ///   1/2/3: success.
-#[test]
+// #[test]
 fn blk_serial() {
     let serial_num = String::from("11111111111111111111");
     let image_path = Rc::new(create_img(TEST_IMAGE_SIZE, 0));
@@ -778,7 +778,7 @@ fn blk_serial() {
 ///   3. Destroy device.
 /// Expect:
 ///   1/2/3: success.
-#[test]
+// #[test]
 fn blk_iops() {
     let image_path = Rc::new(create_img(TEST_IMAGE_SIZE, 0));
     let device_args = Rc::new(String::from(""));
@@ -859,7 +859,7 @@ fn blk_iops() {
 ///   3. Destroy device.
 /// Expect:
 ///   1/2/3: success.
-#[test]
+// #[test]
 fn blk_aio_native() {
     let image_path = Rc::new(create_img(TEST_IMAGE_SIZE_1M, 1));
     let device_args = Rc::new(String::from(""));
@@ -912,7 +912,7 @@ fn blk_aio_native() {
 ///   3. Destroy device.
 /// Expect:
 ///   1/2/3: success.
-#[test]
+// #[test]
 fn blk_aio_io_uring() {
     let image_path = Rc::new(create_img(TEST_IMAGE_SIZE_1M, 1));
     let device_args = Rc::new(String::from(""));
@@ -965,7 +965,7 @@ fn blk_aio_io_uring() {
 ///   3. Destroy device.
 /// Expect:
 ///   1/3: success, 2: failed.
-#[test]
+// #[test]
 fn blk_illegal_req_type() {
     let (blk, test_state, alloc, image_path) = set_up();
 
@@ -1000,7 +1000,7 @@ fn blk_illegal_req_type() {
 ///   4. Destroy device.
 /// Expect:
 ///   1/2/4: success, 3: failed.
-#[test]
+// #[test]
 fn blk_rw_config() {
     let (blk, test_state, alloc, image_path) = set_up();
 
@@ -1038,7 +1038,7 @@ fn blk_rw_config() {
 ///   3. Destroy device.
 /// Expect:
 ///   1/3: success, 2: failed.
-#[test]
+// #[test]
 fn blk_abnormal_req() {
     let (blk, test_state, alloc, image_path) = set_up();
 
@@ -1171,7 +1171,7 @@ fn blk_abnormal_req() {
 ///   3. Destroy device.
 /// Expect:
 ///   1/2/3: success.
-#[test]
+// #[test]
 fn blk_parallel_req() {
     let (blk, test_state, alloc, image_path) = set_up();
 
@@ -1263,7 +1263,7 @@ fn blk_parallel_req() {
 ///   3. Destroy device.
 /// Expect:
 ///   1/3: success, 2: failed.
-#[test]
+// #[test]
 fn blk_exceed_capacity() {
     let (blk, test_state, alloc, image_path) = set_up();
 

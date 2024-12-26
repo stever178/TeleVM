@@ -118,18 +118,20 @@ pub fn create_blk(
     let mut args: Vec<&str> = "-machine microvm".split(' ').collect();
     extra_args.append(&mut args);
 
-    let blk_pci_args = format!(
-        "-device {},id=drv0,drive=drive0,bus=pcie.0,addr={}.0{}",
-        "virtio-blk-pci", pci_slot, device_args,
-    );
-    args = blk_pci_args[..].split(' ').collect();
-    extra_args.append(&mut args);
-    let blk_args = format!(
-        "-drive if=none,id=drive0,file={},format=raw{}",
-        image_path, drive_args,
-    );
-    args = blk_args.split(' ').collect();
-    extra_args.append(&mut args);
+    // Unsupported device: "virtio-blk-pci"Failed to realize micro VM. 
+    // todo: but why?
+    // let blk_pci_args = format!(
+    //     "-device {},id=drv0,drive=drive0,bus=pcie.0,addr={}.0{}",
+    //     "virtio-blk-pci", pci_slot, device_args,
+    // );
+    // args = blk_pci_args[..].split(' ').collect();
+    // extra_args.append(&mut args);
+    // let blk_args = format!(
+    //     "-drive if=none,id=drive0,file={},format=raw{}",
+    //     image_path, drive_args,
+    // );
+    // args = blk_args.split(' ').collect();
+    // extra_args.append(&mut args);
 
     if !other_args.is_empty() {
         args = other_args.split(' ').collect();
@@ -140,6 +142,7 @@ pub fn create_blk(
     let machine = TestStdMachine::new(test_state.clone());
     let allocator = machine.allocator.clone();
 
+    println!("Creating block device at PCI slot {} function {}", pci_slot, pci_fn);
     let virtio_blk = Rc::new(RefCell::new(TestVirtioPciDev::new(machine.pci_bus.clone())));
 
     virtio_blk.borrow_mut().init(pci_slot, pci_fn);

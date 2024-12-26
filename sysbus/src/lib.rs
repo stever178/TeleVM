@@ -163,6 +163,7 @@ pub enum SysBusDevType {
     Plic,
     FwCfg,
     Ramfb,
+    PcieMem,
     Others,
 }
 

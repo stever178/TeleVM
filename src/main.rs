@@ -19,6 +19,8 @@
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::sync::{Arc, Mutex};
+use std::path::Path;
+use std::fs::File;
 
 use anyhow::{bail, Context, Result};
 use log::{error, info};
@@ -32,8 +34,10 @@ use machine_manager::{
     signal_handler::{exit_with_code, register_kill_signal, VM_EXIT_GENE_ERR},
     socket::Socket,
     temp_cleaner::TempCleaner,
+    test_server::TestSock,
 };
 use util::loop_context::EventNotifierHelper;
+use util::test_helper::{is_test_enabled, set_test_enabled};
 use util::{arg_parser, daemonize::daemonize, logger, set_termi_canon_mode};
 
 use thiserror::Error;
@@ -94,6 +98,10 @@ fn main() {
 fn run() -> Result<()> {
     let cmd_args = create_args_parser().get_matches()?;
 
+    if cmd_args.is_present("mod-test") {
+        set_test_enabled();
+    }
+
     if let Some(logfile_path) = cmd_args.value_of("display log") {
         if logfile_path.is_empty() {
             logger::init_logger_with_env(Some(Box::new(std::io::stdout())))
@@ -138,6 +146,7 @@ fn run() -> Result<()> {
             TempCleaner::clean();
         }
         Err(ref e) => {
+            println!("exit at real_main err");
             set_termi_canon_mode().expect("Failed to set terminal to canonical mode.");
             if cmd_args.is_present("display log") {
                 error!("{}", format!("{:?}", e));
@@ -184,6 +193,34 @@ fn real_main(cmd_args: &arg_parser::ArgMatches, vm_config: &mut VmConfig) -> Res
             ));
             MachineOps::realize(&vm, vm_config).with_context(|| "Failed to realize micro VM.")?;
             EventLoop::set_manager(vm.clone(), None);
+
+            // if cmd_args.is_present("mod-test") {
+            if is_test_enabled() {
+                let sock_path = cmd_args.value_of("mod-test").unwrap();
+                println!("[[ successfully test_enabled ]], sock_path is {} ", &sock_path);
+
+                // 检查socket文件是否存在，如果不存在则创建
+                // if !Path::new(&sock_path).exists() {
+                    // println!("sock_path does not exist");
+                    // match File::create(&sock_path) {
+                    //     Ok(_) => {
+                    //         println!("Socket file created: {}", &sock_path)
+                    //     },
+                    //     Err(e) => {
+                    //         eprintln!("Failed to create socket file: {}", e)
+                    //     },
+                    // }
+                // }
+
+                let test_sock = Some(TestSock::new(sock_path.as_str(), vm.clone()));
+                EventLoop::update_event(
+                    EventNotifierHelper::internal_notifiers(Arc::new(Mutex::new(
+                        test_sock.unwrap(),
+                    ))),
+                    None,
+                )
+                .with_context(|| "Failed to add test socket to MainLoop")?;
+            }
 
             for listener in listeners {
                 sockets.push(Socket::from_unix_listener(listener, Some(vm.clone())));

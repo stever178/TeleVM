@@ -17,6 +17,7 @@
 //! - interrupt controller (riscv64)
 //! - legacy devices, such as serial devices
 
+pub mod pcie_mem; 
 mod interrupt_controller;
 pub mod legacy;
 

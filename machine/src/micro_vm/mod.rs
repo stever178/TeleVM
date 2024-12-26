@@ -47,7 +47,7 @@ use machine_manager::config::{
 use machine_manager::event;
 use machine_manager::machine::{
     DeviceInterface, KvmVmState, MachineAddressInterface, MachineExternalInterface,
-    MachineInterface, MachineLifecycle, MigrateInterface,
+    MachineInterface, MachineLifecycle, MachineTestInterface, MigrateInterface,
 };
 use machine_manager::{
     config::{BootSource, ConfigCheck, NetworkInterfaceConfig, SerialConfig, VmConfig, DEFAULT_VIRTQUEUE_SIZE, DriveFile},
@@ -62,6 +62,7 @@ use virtio::{
     create_tap, Block, BlockState, Net, VhostKern, VirtioDevice, VirtioMmioDevice,
     VirtioMmioState, VirtioNetState,
 };
+use devices::pcie_mem::PcieMem;
 
 use super::{error::MachineError, MachineOps};
 use anyhow::{anyhow, bail, Context, Result};
@@ -591,6 +592,25 @@ impl MachineOps for LightMachine {
     fn realize(vm: &Arc<Mutex<Self>>, vm_config: &mut VmConfig) -> MachineResult<()> {
         let mut locked_vm = vm.lock().unwrap();
 
+        // 创建并注册PcieMem设备
+        let pcie_ecam = Arc::new(Mutex::new(PcieMem::new(
+            MEM_LAYOUT[LayoutEntryType::PcieEcam as usize].1
+        )));
+        locked_vm.sysbus.attach_device(
+            &pcie_ecam,
+            MEM_LAYOUT[LayoutEntryType::PcieEcam as usize].0,
+            MEM_LAYOUT[LayoutEntryType::PcieEcam as usize].1,
+        )?;
+
+        let pcie_mmio = Arc::new(Mutex::new(PcieMem::new(
+            MEM_LAYOUT[LayoutEntryType::PcieMmio as usize].1
+        )));
+        locked_vm.sysbus.attach_device(
+            &pcie_mmio,
+            MEM_LAYOUT[LayoutEntryType::PcieMmio as usize].0,
+            MEM_LAYOUT[LayoutEntryType::PcieMmio as usize].1,
+        )?;
+
         //trace for lightmachine
         trace_sysbus(&locked_vm.sysbus);
         trace_vm_state(&locked_vm.vm_state);
@@ -686,6 +706,29 @@ impl MachineOps for LightMachine {
         self.vm_start(paused, &self.cpus, &mut self.vm_state.0.lock().unwrap())
     }
 }
+
+// impl LightMachine {
+//     fn init_pci_host(&self) -> Result<()> {
+//         let pcie_ecam_base = MEM_LAYOUT[LayoutEntryType::PcieEcam as usize].0;
+//         let pcie_ecam_size = MEM_LAYOUT[LayoutEntryType::PcieEcam as usize].1;
+//         let pcie_mmio_base = MEM_LAYOUT[LayoutEntryType::PcieMmio as usize].0;
+//         let pcie_mmio_size = MEM_LAYOUT[LayoutEntryType::PcieMmio as usize].1;
+
+//         // 初始化PCI主机控制器
+//         let pci_host = PciHost::new(
+//             &self.sys_mem,
+//             pcie_ecam_base,
+//             pcie_ecam_size,
+//             pcie_mmio_base, 
+//             pcie_mmio_size
+//         )?;
+
+//         // 注册到系统总线
+//         self.sysbus.attach_device(pci_host)?;
+        
+//         Ok(())
+//     }
+// }
 
 impl MachineLifecycle for LightMachine {
     fn pause(&self) -> bool {
@@ -1362,6 +1405,8 @@ impl device_tree::CompileFDT for LightMachine {
         Ok(())
     }
 }
+
+impl MachineTestInterface for LightMachine {}
 
 /// Trace descriptions for some devices at stratovirt startup.
 fn trace_cpu_topo(cpu_topo: &CPUTopology) {

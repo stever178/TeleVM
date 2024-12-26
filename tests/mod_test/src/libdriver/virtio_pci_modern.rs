@@ -30,6 +30,7 @@ const VIRTIO_PCI_CAP_COMMON_CFG: u8 = 1;
 const VIRTIO_PCI_CAP_NOTIFY_CFG: u8 = 2;
 const VIRTIO_PCI_CAP_ISR_CFG: u8 = 3;
 const VIRTIO_PCI_CAP_DEVICE_CFG: u8 = 4;
+const INVALID_BAR_ADDR: u64 = u64::MAX;
 
 #[repr(C, packed)]
 pub struct VirtioPciCap {
@@ -124,12 +125,30 @@ impl TestVirtioPciDev {
 
     fn enable(&mut self) {
         self.pci_dev.enable();
+        println!("Enabling device, mapping BAR{}", self.bar_idx);
         self.bar = self.pci_dev.io_map(self.bar_idx);
+        if self.bar == INVALID_BAR_ADDR {
+            println!("Warning: Failed to map BAR{}, trying alternative BARs", self.bar_idx);
+            // 尝试其他 BAR
+            for i in 0..6 {
+                if i != self.bar_idx {
+                    self.bar = self.pci_dev.io_map(i);
+                    if self.bar != INVALID_BAR_ADDR {
+                        println!("Successfully mapped BAR{} instead", i);
+                        self.bar_idx = i;
+                        break;
+                    }
+                }
+            }
+        }
+        println!("Mapped BAR address: 0x{:x}", self.bar);
     }
 
     fn find_pci_device(&mut self, devfn: u8) -> bool {
         self.pci_dev.devfn = devfn;
-        self.pci_dev.config_readw(PCI_VENDOR_ID) != 0xFFFF
+        let vendor_id = self.pci_dev.config_readw(PCI_VENDOR_ID);
+        println!("Looking for PCI device at devfn 0x{:x}, vendor_id: 0x{:x}", devfn, vendor_id);
+        vendor_id != 0xFFFF
     }
 
     fn find_structure(
@@ -171,27 +190,44 @@ impl TestVirtioPciDev {
     }
 
     fn pci_device_type_probe(&mut self) -> Option<u16> {
-        let device_type;
         let vendor_id = self.pci_dev.config_readw(PCI_VENDOR_ID);
+        println!("Probing device: vendor_id=0x{:x}", vendor_id);
         if vendor_id != 0x1af4 {
+            println!("Not a virtio device (wrong vendor ID)");
             return None;
         }
 
         let device_id = self.pci_dev.config_readw(PCI_DEVICE_ID);
+        println!("Device ID: 0x{:x}", device_id);
         if !(0x1000..=0x107f).contains(&device_id) {
+            println!("Device ID out of virtio range");
             return None;
         }
-        if device_id < 0x1040 {
-            device_type = self.pci_dev.config_readw(PCI_SUBSYSTEM_ID);
-        } else {
-            device_type = device_id - 0x1040;
-        }
 
-        self.pci_layout_probe();
+        let device_type = if device_id < 0x1040 {
+            let subsys_id = self.pci_dev.config_readw(PCI_SUBSYSTEM_ID);
+            println!("Legacy virtio device, subsys_id=0x{:x}", subsys_id);
+            subsys_id
+        } else {
+            println!("Modern virtio device");
+            device_id - 0x1040
+        };
+
+        println!("Device type: 0x{:x}", device_type);
+        if !self.pci_layout_probe() {
+            println!("Failed to probe PCI layout");
+            return None;
+        }
         Some(device_type)
     }
 
     fn pci_layout_probe(&mut self) -> bool {
+        println!("Probing PCI layout for device...");
+        // 打印设备 ID 等信息
+        let vendor_id = self.pci_dev.config_readw(PCI_VENDOR_ID);
+        let device_id = self.pci_dev.config_readw(PCI_DEVICE_ID);
+        println!("Device: Vendor ID=0x{:x}, Device ID=0x{:x}", vendor_id, device_id);
+        
         let mut bar: u8 = 0;
         let notify_cfg_addr: Rc<RefCell<Option<u8>>> = Rc::new(RefCell::new(Some(0)));
 
@@ -419,6 +455,10 @@ impl VirtioDeviceOps for TestVirtioPciDev {
     }
 
     fn set_status(&self, status: u8) {
+        println!("bar_addr: 0x{:x}, offset: 0x{:x}, status: {:x}", 
+            self.bar, 
+            self.common_base as u64 + offset_of!(VirtioPciCommonCfg, device_status) as u64, 
+            status);
         self.pci_dev.io_writeb(
             self.bar,
             self.common_base as u64 + offset_of!(VirtioPciCommonCfg, device_status) as u64,

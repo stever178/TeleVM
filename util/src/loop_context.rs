@@ -536,8 +536,30 @@ impl EventLoopContext {
         }
     }
 
+    pub fn timers_min_timeout_ns(&self) -> i64 {
+        // The kick event happens before re-evaluate can be ignored.
+        self.kicked.store(false, Ordering::SeqCst);
+        let timers = self.timers.lock().unwrap();
+        if timers.is_empty() {
+            return -1;
+        }
+
+        let now = Instant::now();
+        if timers[0].expire_time <= now {
+            return 0;
+        }
+
+        let timeout = (timers[0].expire_time - now).as_nanos();
+        if timeout >= i64::MAX as u128 {
+            i64::MAX - 1
+        } else {
+            timeout as i64
+        }
+    }
+
+
     /// Call function of the timers which have already expired.
-    fn run_timers(&mut self) {
+    pub fn run_timers(&mut self) {
         let now = Instant::now();
         let mut expired_nr = 0;
 

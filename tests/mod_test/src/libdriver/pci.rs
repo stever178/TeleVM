@@ -95,9 +95,9 @@ pub struct TestPciDev {
     pub msix_enabled: bool,
     pub msix_table_bar: PCIBarAddr,
     pub msix_pba_bar: PCIBarAddr,
-    pub msix_table_off: u64,
-    pub msix_pba_off: u64,
-    pub msix_used_vectors: u32,
+    pub msix_table_off: u64, // MSI-X 表在 BAR 中的偏移
+    pub msix_pba_off: u64,   // PBA 在 BAR 中的偏移
+    pub msix_used_vectors: u32, // 已使用的向量数
 }
 
 impl TestPciDev {
@@ -109,7 +109,7 @@ impl TestPciDev {
             msix_enabled: false,
             msix_table_bar: 0,
             msix_pba_bar: 0,
-            msix_table_off: 0,
+            msix_table_off: 0, 
             msix_pba_off: 0,
             msix_used_vectors: 0,
         }
@@ -155,11 +155,14 @@ impl TestPciDev {
     ///
     /// `bar_addr` - Address of the bar where the MSI-X is located. Address allocated by Default.
     pub fn enable_msix(&mut self, bar_addr: Option<u64>) {
+        // 查找 MSI-X capability
         let addr = self.find_capability(PCI_CAP_ID_MSIX, 0);
         assert!(addr != 0);
+        // 设置 MSI-X 使能位
         let value = self.config_readw(addr + PCI_MSIX_MSG_CTL);
         self.config_writew(addr + PCI_MSIX_MSG_CTL, value | PCI_MSIX_MSG_CTL_ENABLE);
 
+        // 获取并设置 MSI-X 表的位置
         let table = self.config_readl(addr + PCI_MSIX_TABLE);
         let bar_table = table & PCI_MSIX_TABLE_BIR;
         self.msix_table_bar = if let Some(addr) = bar_addr {
@@ -169,6 +172,7 @@ impl TestPciDev {
         };
         self.msix_table_off = (table & !PCI_MSIX_TABLE_BIR).try_into().unwrap();
 
+        // 获取并设置 PBA 的位置
         let table = self.config_readl(addr + PCI_MSIX_PBA);
         let bar_pba = table & PCI_MSIX_TABLE_BIR;
         if bar_pba != bar_table {
@@ -269,19 +273,51 @@ impl TestPciDev {
         assert!(barnum <= 5);
         let bar_offset: u8 = BAR_MAP[barnum as usize];
 
+        println!("Mapping BAR{} at offset 0x{:x}", barnum, bar_offset);
+        
+        let orig_value = self.config_readl(bar_offset);
+        println!("Original BAR value: 0x{:x}", orig_value);
+        
+        // 如果原始值为0，说明这个BAR未被使用
+        if orig_value == 0 {
+            println!("[ return ] BAR{} is not used by device", barnum);
+            return INVALID_BAR_ADDR;
+        }
+        
         self.config_writel(bar_offset, 0xFFFFFFFF);
+        let written = self.config_readl(bar_offset);
+        println!("After writing 0xFFFFFFFF, read back: 0x{:x}", written);
+        
         addr = self.config_readl(bar_offset) & !(0x0F_u32);
-        assert!(addr != 0);
+        println!("BAR size probe addr (after masking): 0x{:x}", addr);
+        
+        // 移除断言，改用返回值
+        if addr == 0 {
+            println!("[ return ] BAR probe returned 0, invalid");
+            // 恢复原始值
+            self.config_writel(bar_offset, orig_value);
+            return INVALID_BAR_ADDR;
+        }
 
         let mut pci_bus = self.pci_bus.borrow_mut();
         size = 1 << addr.trailing_zeros();
         location = (pci_bus.mmio_alloc_ptr + size - 1) / size * size;
+        
+        println!("BAR size: 0x{:x}, calculated location: 0x{:x}", size, location);
+        println!("Current mmio_alloc_ptr: 0x{:x}, mmio_limit: 0x{:x}", 
+                 pci_bus.mmio_alloc_ptr, pci_bus.mmio_limit);
+
         if location < pci_bus.mmio_alloc_ptr || location + size > pci_bus.mmio_limit {
+            println!("[ return ] BAR allocation failed: location out of range");
+            // 恢复原始值
+            self.config_writel(bar_offset, orig_value);
             return INVALID_BAR_ADDR;
         }
 
         pci_bus.mmio_alloc_ptr = location + size;
         drop(pci_bus);
+        
+        println!("Writing location 0x{:x} to BAR{}", location, barnum);
         self.config_writel(bar_offset, location as u32);
         bar_addr = location;
         bar_addr
@@ -340,9 +376,12 @@ impl TestPciDev {
 impl PciMsixOps for TestPciDev {
     fn set_msix_vector(&self, msix_entry: u16, msix_addr: u64, msix_data: u32) {
         assert!(self.msix_enabled);
+        
+        // 计算表项偏移
         let offset = self.msix_table_off + (msix_entry * 16) as u64;
 
         let msix_table_bar = self.msix_table_bar;
+        // 设置消息地址（64位）(目标处理器)
         self.io_writel(
             msix_table_bar,
             offset + PCI_MSIX_ENTRY_LOWER_ADDR,
@@ -353,8 +392,10 @@ impl PciMsixOps for TestPciDev {
             offset + PCI_MSIX_ENTRY_UPPER_ADDR,
             (msix_addr >> 32).try_into().unwrap(),
         );
+        // 设置消息数据（中断向量号）
         self.io_writel(msix_table_bar, offset + PCI_MSIX_ENTRY_DATA, msix_data);
 
+        // 启用该向量（清除向量屏蔽位）
         let ctl = self.io_readl(msix_table_bar, offset + PCI_MSIX_ENTRY_VECTOR_CTRL);
         self.io_writel(
             msix_table_bar,

@@ -49,9 +49,12 @@ pub struct TestPciBus {
 
 impl TestPciBus {
     pub fn new(test_state: Rc<RefCell<TestState>>) -> Self {
+        println!("Initializing PCI bus with MMIO base: 0x{:x}, size: 0x{:x}", 
+                 PCIE_MMIO_BASE, PCIE_MMIO_SIZE);
         Self {
             mmio_alloc_ptr: PCIE_MMIO_BASE,
-            mmio_limit: PCIE_MMIO_SIZE,
+            // todo
+            mmio_limit: PCIE_MMIO_BASE + PCIE_MMIO_SIZE,
             ecam_alloc_ptr: PCIE_ECAM_BASE,
             not_hotpluggable: false,
             test_state,
@@ -59,7 +62,10 @@ impl TestPciBus {
     }
 
     fn get_addr(&self, bus_num: u8, devfn: u8, offset: u8) -> u64 {
-        self.ecam_alloc_ptr + ((bus_num as u32) << 20 | (devfn as u32) << 12 | offset as u32) as u64
+        let addr = self.ecam_alloc_ptr + ((bus_num as u32) << 20 | (devfn as u32) << 12 | offset as u32) as u64;
+        println!("PCI config space access: bus={}, devfn=0x{:x}, offset=0x{:x} -> addr=0x{:x}",
+                 bus_num, devfn, offset, addr);
+        addr
     }
 
     pub fn pci_auto_bus_scan(&self, root_port_num: u8) {
@@ -122,7 +128,9 @@ impl PciBusOps for TestPciBus {
     fn config_readl(&self, bus_num: u8, devfn: u8, offset: u8) -> u32 {
         let addr = self.get_addr(bus_num, devfn, offset);
         let mut buf: &[u8] = &self.test_state.borrow().memread(addr, 4)[0..4];
-        read_le_u32(&mut buf)
+        let value = read_le_u32(&mut buf);
+        // println!("PCI config Read value: 0x{:x}", value);
+        value
     }
 
     fn config_readq(&self, bus_num: u8, devfn: u8, offset: u8) -> u64 {

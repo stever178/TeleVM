@@ -34,7 +34,8 @@ static TEST_MSIX_LIST: Lazy<Mutex<Vec<MsixMsg>>> = Lazy::new(|| Mutex::new(Vec::
 pub fn set_test_enabled() {
     #[cfg(target_arch = "x86_64")]
     panic!("module test framework does not support x86_64.");
-    #[cfg(target_arch = "aarch64")]
+    // #[cfg(target_arch = "aarch64")]
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
     {
         if let Err(_e) = TEST_ENABLED.set(true) {
             panic!("Failed to enable test server.");

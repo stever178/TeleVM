@@ -91,7 +91,7 @@ pub fn create_img(size: u64, flag: u8) -> String {
         .output()
         .expect("failed to create image");
 
-    println!("output is {:?}", output);
+    // println!("output is {:?}", output);
     if !output.status.success() {
         eprintln!("Error: {:?}", String::from_utf8_lossy(&output.stderr));
     }
