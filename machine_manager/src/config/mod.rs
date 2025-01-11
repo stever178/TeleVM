@@ -25,6 +25,7 @@ pub use pci::*;
 pub use rng::*;
 pub use sasl_auth::*;
 pub use tls_creds::*;
+pub use vnc::*;
 
 mod boot_source;
 mod chardev;
@@ -40,7 +41,7 @@ mod pci;
 mod rng;
 mod sasl_auth;
 mod tls_creds;
-
+pub mod vnc;
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -99,7 +100,7 @@ pub struct VmConfig {
     pub global_config: HashMap<String, String>,
   //  pub numa_nodes: Vec<(String, String)>,
     pub incoming: Option<Incoming>,
-  //  pub vnc: Option<VncConfig>,
+    pub vnc: Option<VncConfig>,
 }
 
 impl VmConfig {
