@@ -6,5 +6,8 @@ target = "riscv64gc-unknown-linux-gnu"
 rustflags = [
     "-C", "target-feature=+crt-static"
 ]
+[target.'cfg(not(target_arch = "riscv64"))']
 linker = "riscv64-unknown-linux-gnu-gcc"
-
+#ricv64架构使用本地编译器gcc
+[target.'cfg(target_arch = "riscv64")']
+linker = "gcc"

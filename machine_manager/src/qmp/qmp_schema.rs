@@ -1295,6 +1295,62 @@ pub struct BalloonInfo {
     pub actual: u64,
 }
 
+/// query-vnc:
+/// Information about current VNC server.
+///
+/// # Examples
+///
+/// For pc machine type started with -vnc ip:port(for example: 0.0.0.0:0):
+/// ```text
+/// -> { "execute": "query-vnc" }
+/// <- {"return": {
+///         "enabled": true,
+///         "host": "0.0.0.0",
+///         "service": "50401",
+///         "auth": "None",
+///         "family": "ipv4",
+///         "clients": [
+///             "host": "127.0.0.1",
+///             "service": "50401",
+///             "family": "ipv4",
+///         ]
+///         }
+///     }
+/// ```
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct query_vnc {}
+impl Command for query_vnc {
+    type Res = VncInfo;
+    fn back(self) -> VncInfo {
+        Default::default()
+    }
+}
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct VncInfo {
+    #[serde(rename = "enabled")]
+    pub enabled: bool,
+    #[serde(rename = "host")]
+    pub host: String,
+    #[serde(rename = "service")]
+    pub service: String,
+    #[serde(rename = "auth")]
+    pub auth: String,
+    #[serde(rename = "family")]
+    pub family: String,
+    #[serde(rename = "clients")]
+    pub clients: Vec<VncClientInfo>,
+}
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct VncClientInfo {
+    #[serde(rename = "host")]
+    pub host: String,
+    #[serde(rename = "service")]
+    pub service: String,
+    #[serde(rename = "family")]
+    pub family: String,
+}
+
+
 /// balloon:
 ///
 /// Advice VM to change memory size with the argument `value`.

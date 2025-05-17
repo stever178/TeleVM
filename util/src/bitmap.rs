@@ -62,6 +62,62 @@ impl<T: BitOps> Bitmap<T> {
         Ok(())
     }
 
+    /// Set the range of bitmap.
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - the begin bit.
+    /// * `len` - the end bit.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use util::bitmap::Bitmap;
+    /// let mut bitmap = Bitmap::<u64>::new(4);
+    /// assert!(bitmap.set_range(65, 10).is_ok());
+    /// assert_eq!(bitmap.contain(64).unwrap(), false);
+    /// assert_eq!(bitmap.contain(65).unwrap(), true);
+    /// assert_eq!(bitmap.contain(70).unwrap(), true);
+    /// assert_eq!(bitmap.contain(74).unwrap(), true);
+    /// assert_eq!(bitmap.contain(75).unwrap(), false);
+    /// ```
+    pub fn set_range(&mut self, start: usize, len: usize) -> Result<()> {
+        if len == 0 {
+            return Ok(());
+        }
+
+        let mut index = self.bit_index(start);
+        let mut bits_to_set: usize = T::len() - self.bit_pos(start);
+        let mut mask_to_set: T = T::full().rhs(self.bit_pos(start));
+        let mut length: usize = len;
+        while length >= bits_to_set {
+            if index >= self.size() {
+                return Err(anyhow!(UtilError::OutOfBound(
+                    index as u64,
+                    self.vol() as u64
+                )));
+            }
+            length -= bits_to_set;
+            self.data[index] = T::bit_or(self.data[index], mask_to_set);
+            bits_to_set = T::len();
+            mask_to_set = T::full();
+            index += 1;
+        }
+        if length > 0 {
+            if index >= self.size() {
+                return Err(anyhow!(UtilError::OutOfBound(
+                    index as u64,
+                    self.vol() as u64
+                )));
+            }
+            bits_to_set = T::len() - self.bit_pos(start + len);
+            let mask_to_set_end: T = T::full().lhs(self.bit_pos(bits_to_set));
+            mask_to_set = T::bit_and(mask_to_set, mask_to_set_end);
+            self.data[index] = T::bit_or(self.data[index], mask_to_set);
+        }
+        Ok(())
+    }
+
     /// Clear the bit of bitmap.
     ///
     /// # Arguments
@@ -79,6 +135,91 @@ impl<T: BitOps> Bitmap<T> {
             self.data[index],
             T::bit_not(T::one().rhs(self.bit_pos(num))),
         );
+        Ok(())
+    }
+
+    /// Clear the range of bitmap.
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - the begin bit.
+    /// * `len` - the end bit.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use util::bitmap::Bitmap;
+    /// let mut bitmap = Bitmap::<u64>::new(4);
+    /// assert!(bitmap.set_range(0, 256).is_ok());
+    /// assert!(bitmap.clear_range(65, 10).is_ok());
+    ///
+    /// assert_eq!(bitmap.contain(64).unwrap(), true);
+    /// assert_eq!(bitmap.contain(65).unwrap(), false);
+    /// assert_eq!(bitmap.contain(70).unwrap(), false);
+    /// assert_eq!(bitmap.contain(74).unwrap(), false);
+    /// assert_eq!(bitmap.contain(75).unwrap(), true);
+    /// ```
+    pub fn clear_range(&mut self, start: usize, len: usize) -> Result<()> {
+        if len == 0 {
+            return Ok(());
+        }
+
+        let mut index = self.bit_index(start);
+        let mut bits_to_clear: usize = T::len() - self.bit_pos(start);
+        let mut mask_to_clear: T = T::bit_not(T::full().rhs(self.bit_pos(start)));
+        let mut length: usize = len;
+        while length >= bits_to_clear {
+            if index >= self.size() {
+                return Err(anyhow!(UtilError::OutOfBound(
+                    index as u64,
+                    self.vol() as u64
+                )));
+            }
+            length -= bits_to_clear;
+            self.data[index] = T::bit_and(self.data[index], mask_to_clear);
+            bits_to_clear = T::len();
+            mask_to_clear = T::zero();
+            index += 1;
+        }
+        if length > 0 {
+            if index >= self.size() {
+                return Err(anyhow!(UtilError::OutOfBound(
+                    index as u64,
+                    self.vol() as u64
+                )));
+            }
+            bits_to_clear = T::len() - self.bit_pos(start + len);
+            let mask_to_clear_end: T = T::bit_not(T::full().lhs(self.bit_pos(bits_to_clear)));
+            mask_to_clear = T::bit_or(mask_to_clear, mask_to_clear_end);
+            self.data[index] = T::bit_and(self.data[index], mask_to_clear);
+        }
+        Ok(())
+    }
+
+    /// Change the bit of bitmap.
+    ///
+    /// # Arguments
+    ///
+    /// * `num` - the input number
+    /// # Example
+    ///
+    /// ```rust
+    /// use util::bitmap::Bitmap;
+    /// let mut bitmap = Bitmap::<u16>::new(1);
+    /// assert!(bitmap.change(15).is_ok());
+    /// assert_eq!(bitmap.contain(15).unwrap(), true);
+    /// assert!(bitmap.change(15).is_ok());
+    /// assert_eq!(bitmap.contain(15).unwrap(), false);
+    /// ```
+    pub fn change(&mut self, num: usize) -> Result<()> {
+        let index = self.bit_index(num);
+        if index >= self.size() {
+            return Err(anyhow!(UtilError::OutOfBound(
+                index as u64,
+                self.vol() as u64
+            )));
+        }
+        self.data[index] = T::bit_xor(self.data[index], T::one().rhs(self.bit_pos(num)));
         Ok(())
     }
 
